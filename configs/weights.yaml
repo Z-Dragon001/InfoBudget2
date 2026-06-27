@@ -1,0 +1,13 @@
+scoring:
+  intrinsic:
+    entropy: 0.25
+    lexical_density: 0.25
+    entity_density: 0.25
+    concept_density: 0.25
+  utility:
+    semantic_novelty: 0.40
+    entity_novelty: 0.25
+    episodic_novelty: 0.35
+  fusion:
+    intrinsic_weight: 0.50
+    utility_weight: 0.50

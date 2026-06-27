@@ -1,0 +1,13 @@
+prices:
+  Qwen/Qwen2.5-7B-Instruct:
+    official_price_in_per_1m: 0.30
+    official_price_out_per_1m: 1.20
+    currency: "USD"
+  Qwen/Qwen3-30B-A3B-Instruct-2507:
+    official_price_in_per_1m: 0.80
+    official_price_out_per_1m: 3.20
+    currency: "USD"
+  gpt-4.1-mini:
+    official_price_in_per_1m: 0.40
+    official_price_out_per_1m: 1.60
+    currency: "USD"

@@ -1,0 +1,25 @@
+models:
+  small:
+    deploy: "local"
+    backend: "vllm"
+    model_name: "Qwen/Qwen2.5-7B-Instruct"
+    tokenizer_name: "Qwen/Qwen2.5-7B-Instruct"
+    max_context_tokens: 32768
+    tensor_parallel_size: 1
+    dtype: "bfloat16"
+  medium:
+    deploy: "local"
+    backend: "vllm"
+    model_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    tokenizer_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    max_context_tokens: 32768
+    tensor_parallel_size: 2
+    dtype: "bfloat16"
+  large:
+    deploy: "api"
+    backend: "openai_compatible"
+    model_name: "gpt-4.1-mini"
+    tokenizer_name: "gpt-4.1-mini"
+    max_context_tokens: 128000
+    tensor_parallel_size: 1
+    dtype: "n/a"

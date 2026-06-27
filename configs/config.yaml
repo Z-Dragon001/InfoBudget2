@@ -1,0 +1,55 @@
+project:
+  name: "InfoBudget"
+  seed: 42
+  log_dir: "./outputs/logs"
+  output_dir: "./outputs"
+
+segmentation:
+  method: "lite_topic_seg"
+  embedding_model: "hashing-encoder-v1"
+  similarity_threshold: 0.72
+  drop_threshold: 0.12
+  enable_smoothing: true
+  smooth_alpha: 0.6
+  min_boundary_gap: 1
+  min_segment_turns: 2
+  min_segment_tokens: 20
+  max_segment_turns: 12
+  max_segment_tokens: 768
+  merge_short_segment: true
+  trace_enabled: true
+
+scoring:
+  tokenizer_name: "hashing-tokenizer-v1"
+  novelty_top_k: 5
+  use_faiss: false
+  semantic_embedding_model: "hashing-encoder-v1"
+  episodic_embedding_model: "hashing-encoder-v1"
+  spacy_model: ""
+
+router:
+  method: "fixed_percentile_router"
+  p33: 0.38
+  p67: 0.71
+  deferred_fit: true
+  trace_enabled: true
+
+extractor:
+  mode: "joint"
+  max_new_tokens: 1024
+  json_mode: true
+  local_backend: "vllm"
+  api_backend: "openai_compatible"
+
+storage:
+  jsonl_dir: "./outputs/memory_jsonl"
+  faiss_dir: "./outputs/faiss"
+  normalize_embeddings: true
+  faiss_index_type: "flat_ip"
+
+evaluation:
+  datasets: ["locomo", "longmemeval"]
+  judge_mode: "llm_judge"
+  track_build_stage: true
+  track_qa_stage: true
+  save_predictions: true
