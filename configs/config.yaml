@@ -46,7 +46,7 @@ router:
 extractor:
   mode: "joint"
   max_new_tokens: 1024
-  json_mode: true
+  json_mode: false
   local_backend: "vllm"
   api_backend: "openai_compatible"
   fallback_to_mock: false

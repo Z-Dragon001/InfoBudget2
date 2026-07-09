@@ -22,12 +22,12 @@ models:
   large:
     deploy: "api"
     backend: "openai_compatible"
-    model_name: "Qwen/Qwen3-Next-80B-A3B-Instruct"
-    tokenizer_name: "Qwen/Qwen3-Next-80B-A3B-Instruct"
-    api_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    api_key: "sk-ws-H.RXLDDXR.LMQO.MEYCIQCRHkJwUN9Hx_DjsfyUMtc9JfCKvqwFBivsRs0wlLiduAIhAPpx3-lLsNFwzqMX2mGuh-C38CkiY2H_BfsHG35eahCK"
+    model_name: "qwen/qwen3-next-80b-a3b-instruct"
+    tokenizer_name: "qwen/qwen3-next-80b-a3b-instruct"
+    api_base_url: "https://api.novita.ai/openai/v1"
+    api_key: "sk_UGrG5j2iYX4Gkanuz7HdmsB-rFcKiOjvoOV7g58eAJs"
     api_key_env: "DASHSCOPE_API_KEY"
-    request_model_name: "qwen3-next-80b-a3b-instruct"
+    request_model_name: "qwen/qwen3-next-80b-a3b-instruct"
     max_context_tokens: 262144
     tensor_parallel_size: 1
     dtype: "n/a"

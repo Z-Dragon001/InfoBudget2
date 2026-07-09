@@ -1,13 +1,15 @@
 prices:
   Qwen/Qwen2.5-7B-Instruct:
-    official_price_in_per_1m: 0.30
-    official_price_out_per_1m: 1.20
+    official_price_in_per_1m: 0.04
+    official_price_out_per_1m: 0.10
     currency: "USD"
+
   Qwen/Qwen3-30B-A3B-Instruct-2507-FP8:
-    official_price_in_per_1m: 0.80
-    official_price_out_per_1m: 3.20
+    official_price_in_per_1m: 0.04815
+    official_price_out_per_1m: 0.1931
     currency: "USD"
-  Qwen/Qwen3-Next-80B-A3B-Instruct:
-    official_price_in_per_1m: 0.00
-    official_price_out_per_1m: 0.00
+
+  qwen/qwen3-next-80b-a3b-instruct:
+    official_price_in_per_1m: 0.09
+    official_price_out_per_1m: 1.10
     currency: "USD"
