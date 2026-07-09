@@ -6,6 +6,6 @@
 """
 
 from infobudget.memory.store import MemoryStore
-from infobudget.memory.vector_index import FaissVectorIndex, NumpyFlatIPIndex
+from infobudget.memory.qdrant_index import QdrantVectorIndex
 
-__all__ = ["FaissVectorIndex", "MemoryStore", "NumpyFlatIPIndex"]
+__all__ = ["MemoryStore", "QdrantVectorIndex"]

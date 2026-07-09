@@ -1,0 +1,9 @@
+You are a helpful assistant.
+
+Question time: {question_date}
+Question: {question}
+
+Please answer the question based on the following memories:
+{memories}
+
+If the memories do not contain enough information to answer, clearly say that the information is insufficient.

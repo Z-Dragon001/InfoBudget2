@@ -17,6 +17,8 @@ from infobudget.schemas import CostLogEntry, Tier
 class EvaluationMetrics:
     """基础评估指标。"""
 
+    dataset_name: str
+    split: str
     accuracy: float
     precision: float
     recall: float
@@ -30,6 +32,13 @@ class EvaluationMetrics:
     local_calls: int
     build_latency_ms: int
     qa_latency_ms: int
+    num_examples: int
+    num_questions: int
+    evidence_hit_rate: float
+    evidence_recall_at_k: float
+    avg_retrieved_memories: float
+    abstention_accuracy: float
+    group_accuracy: dict[str, float]
     router_distribution: dict[str, float]
 
     def to_dict(self) -> dict:
@@ -58,8 +67,16 @@ def aggregate_metrics(
     correctness: list[bool],
     cost_logs: list[CostLogEntry],
     routed_tiers: list[Tier],
+    dataset_name: str,
+    split: str,
+    num_examples: int,
     num_queries: int,
     num_memories: int,
+    evidence_hits: list[bool] | None = None,
+    evidence_recalls: list[float] | None = None,
+    retrieved_counts: list[int] | None = None,
+    abstention_correctness: list[bool] | None = None,
+    group_labels: dict[str, list[bool]] | None = None,
     qa_latency_ms: int = 0,
 ) -> EvaluationMetrics:
     """聚合基础实验指标。"""
@@ -73,12 +90,19 @@ def aggregate_metrics(
     latency = sum(item.latency_ms for item in cost_logs)
     counts = Counter(routed_tiers)
     denom = len(routed_tiers) or 1
+    evidence_hits = evidence_hits or []
+    evidence_recalls = evidence_recalls or []
+    retrieved_counts = retrieved_counts or []
+    abstention_correctness = abstention_correctness or []
+    group_labels = group_labels or {}
     distribution = {
         "small": counts.get("small", 0) / denom,
         "medium": counts.get("medium", 0) / denom,
         "large": counts.get("large", 0) / denom,
     }
     return EvaluationMetrics(
+        dataset_name=dataset_name,
+        split=split,
         accuracy=accuracy,
         precision=precision,
         recall=recall,
@@ -92,6 +116,17 @@ def aggregate_metrics(
         local_calls=local_calls,
         build_latency_ms=latency,
         qa_latency_ms=qa_latency_ms,
+        num_examples=num_examples,
+        num_questions=num_queries,
+        evidence_hit_rate=sum(1 for item in evidence_hits if item) / len(evidence_hits) if evidence_hits else 0.0,
+        evidence_recall_at_k=sum(evidence_recalls) / len(evidence_recalls) if evidence_recalls else 0.0,
+        avg_retrieved_memories=sum(retrieved_counts) / len(retrieved_counts) if retrieved_counts else 0.0,
+        abstention_accuracy=(
+            sum(1 for item in abstention_correctness if item) / len(abstention_correctness)
+            if abstention_correctness
+            else 0.0
+        ),
+        group_accuracy={group: compute_accuracy(values) for group, values in group_labels.items()},
         router_distribution=distribution,
     )
 

@@ -1,15 +1,11 @@
-"""功能：测试 MemoryStore 保存与检索。
-输入：模拟 memory entry。
-输出：持久化与加载断言。
-依赖：pytest、项目存储模块。
-作者：OpenAI Codex
-"""
+"""Tests for LightMem-compatible memory store persistence and retrieval."""
 
 from pathlib import Path
+import shutil
 
 from infobudget.config import load_project_bundle
 from infobudget.memory.store import MemoryStore
-from infobudget.schemas import EpisodicMemory, MemoryEntry, SemanticMemory
+from infobudget.schemas import MemoryEntry
 from infobudget.utils.embeddings import HashingTextEncoder
 
 
@@ -18,27 +14,48 @@ def test_memory_store_roundtrip(tmp_path: Path) -> None:
     store = MemoryStore(bundle.config.storage, tmp_path)
     encoder = HashingTextEncoder()
     entry = MemoryEntry(
-        memory_id="",
-        segment_id="seg_000001",
-        topic="infobudget",
-        summary="InfoBudget 关注长期记忆构建成本。",
-        semantic_memory=SemanticMemory(),
-        episodic_memory=EpisodicMemory(),
-        importance=0.7,
-        information_score=0.6,
-        router_level="medium",
-        extraction_mode="joint",
-        extractor_name="mock_joint_extractor",
-        model_used="gpt-4.1-mini",
-        input_tokens=100,
-        output_tokens=50,
-        latency_ms=120,
-        cost_usd=0.001,
+        time_stamp="2025-01-10T00:00:00.000",
+        float_time_stamp=1736467200.0,
+        weekday="Fri",
+        topic_id=0,
+        topic_summary="",
+        memory="InfoBudget focuses on long-term memory construction cost.",
+        original_memory="",
+        compressed_memory="",
+        speaker_id="unknown",
+        speaker_name="User",
+        consolidated=False,
+        update_queue=[],
     )
-    store.add_entry(entry, encoder.encode_text(entry.summary))
+
+    store.add_entry(entry, encoder.encode_text(entry.memory))
     store.save()
     loaded = MemoryStore(bundle.config.storage, tmp_path)
     loaded.load()
-    hits = loaded.retrieve(encoder.encode_text("InfoBudget 成本"), 1)
+    hits = loaded.retrieve(encoder.encode_text("InfoBudget cost"), 1)
+
     assert len(hits) == 1
-    assert hits[0].topic == "infobudget"
+    assert hits[0].topic_id == 0
+    assert hits[0].memory == "InfoBudget focuses on long-term memory construction cost."
+
+
+def test_memory_store_can_rebuild_qdrant_from_jsonl(tmp_path: Path) -> None:
+    bundle = load_project_bundle("configs")
+    encoder = HashingTextEncoder()
+    store = MemoryStore(bundle.config.storage, tmp_path)
+    entry = MemoryEntry(memory="JSONL can restore a missing Qdrant index.")
+
+    store.add_entry(entry, encoder.encode_text(entry.memory))
+    store.save()
+    shutil.rmtree(tmp_path / "outputs" / "qdrant")
+
+    loaded = MemoryStore(bundle.config.storage, tmp_path)
+    loaded.load()
+    assert loaded.needs_index_rebuild()
+
+    loaded.rebuild_indexes(encoder)
+    loaded.save()
+    hits = loaded.retrieve(encoder.encode_text("restore Qdrant index"), 1)
+
+    assert len(hits) == 1
+    assert hits[0].memory == "JSONL can restore a missing Qdrant index."

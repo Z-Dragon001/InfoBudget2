@@ -4,9 +4,19 @@ project:
   log_dir: "./outputs/logs"
   output_dir: "./outputs"
 
+dataset:
+  root_dir: "./datasets"
+  raw_dir: "./datasets/raw"
+  processed_dir: "./datasets/processed"
+  supported_datasets: ["locomo", "longmemeval"]
+  default_splits: ["train", "dev", "test"]
+  fallback_split_name: "full"
+  store_flat_questions: true
+  store_flat_sessions: true
+
 segmentation:
   method: "lite_topic_seg"
-  embedding_model: "hashing-encoder-v1"
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
   similarity_threshold: 0.72
   drop_threshold: 0.12
   enable_smoothing: true
@@ -22,7 +32,6 @@ segmentation:
 scoring:
   tokenizer_name: "hashing-tokenizer-v1"
   novelty_top_k: 5
-  use_faiss: false
   semantic_embedding_model: "hashing-encoder-v1"
   episodic_embedding_model: "hashing-encoder-v1"
   spacy_model: ""
@@ -40,16 +49,38 @@ extractor:
   json_mode: true
   local_backend: "vllm"
   api_backend: "openai_compatible"
+  fallback_to_mock: false
+  extraction_mode: "flat"
 
 storage:
   jsonl_dir: "./outputs/memory_jsonl"
-  faiss_dir: "./outputs/faiss"
+  qdrant_dir: "./outputs/qdrant"
   normalize_embeddings: true
-  faiss_index_type: "flat_ip"
+  qdrant_memory_collection: "memories"
+  qdrant_episode_collection: "episodes"
 
 evaluation:
   datasets: ["locomo", "longmemeval"]
   judge_mode: "llm_judge"
+  qa_mode: "llm_qa"
+  answer_model_tier: "medium"
+  qa_max_new_tokens: 512
+  judge_model:
+    deploy: "api"
+    backend: "openai_compatible"
+    model_name: "gpt-4o-mini"
+    tokenizer_name: "gpt-4o-mini"
+    api_base_url: "https://api.openai.com/v1"
+    api_key: "${OPENAI_API_KEY}"
+    api_key_env: "OPENAI_API_KEY"
+    request_model_name: "gpt-4o-mini"
+    max_context_tokens: 128000
+    tensor_parallel_size: 1
+    dtype: "n/a"
   track_build_stage: true
   track_qa_stage: true
   save_predictions: true
+  retrieval_top_k: 5
+  locomo_retrieval_top_k: 60
+  longmemeval_retrieval_top_k: 20
+  save_retrieval_traces: true

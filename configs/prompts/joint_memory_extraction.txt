@@ -1,38 +1,50 @@
-你是一个长期记忆提取器。请从下面的 topic segment 中同时提取语义记忆和情景记忆，并生成可检索 summary 与 importance 分数。
+You are a Personal Information Extractor.
+Your task is to extract all possible factual long-term memories from a conversation.
+The dialogue is organized into topic segments separated by markers like:
 
-【任务目标】
-将当前 topic segment 压缩为结构化长期记忆，用于未来问答、用户建模、长期上下文恢复和 Agent 决策。
+--- Topic X ---
+[timestamp, weekday] source_id.SpeakerName: message
 
-【语义记忆 Semantic Memory】
-语义记忆关注相对稳定、可长期复用的信息，包括：
-1. 实体：人、组织、地点、项目、产品、论文、系统、工具等。
-2. 实体属性：实体的身份、角色、状态、目标、偏好。
-3. 实体关系：A 属于 B、A 研究 B、A 使用 B、A 约束 B。
-4. 用户偏好：长期偏好、研究方向、工具偏好、表达偏好。
-5. 长期事实：未来问答中可能再次被使用的稳定事实。
-6. 明确约束：用户明确提出的限制、环境条件、实验设置。
+Important Instructions:
+0. Process messages strictly in ascending source_id order. For each message, stop and carefully evaluate its content before moving to the next.
+1. Process every message one by one. Decide whether it contains factual information.
+   - If yes, extract it and rephrase it into a standalone sentence.
+   - If no, skip it.
+   - Do not skip just because the information looks minor. Only skip if it is completely meaningless, such as a pure greeting, filler, or acknowledgement.
+2. Preserve all specific details: full names, locations, numbers, dates, project names, dataset names, model names, file names, products, organizations, and technical identifiers.
+3. Perform light contextual completion so each fact is clear outside the conversation.
+4. Time handling:
+   - Distinguish mention time from event time.
+   - For relative times, preserve the relative phrase and reference the message date when useful.
+5. If an image description appears, integrate relevant visual details into the extracted text facts.
+6. Do not extract relational or emotional dynamics in this prompt. Only extract factual memories.
 
-【情景记忆 Episodic Memory】
-情景记忆关注动态事件、时序关系和状态变化，包括：
-1. 发生了什么事件。
-2. 谁对谁做了什么。
-3. 何时发生。
-4. 事件的先后顺序。
-5. 事件之间的因果、转折或结果。
-6. 对未来决策有价值的重要变化。
+Output JSON only:
+{
+  "data": [
+    {"source_id": 0, "fact": "A complete standalone fact."}
+  ]
+}
 
-【重要要求】
-1. 不要补充原文没有的信息。
-2. 不要保留寒暄、无意义重复或公共常识。
-3. 如果没有语义记忆，semantic_memory 中对应数组留空。
-4. 如果没有情景记忆，episodic_memory.episodes 留空。
-5. summary 必须便于后续向量检索。
-6. importance 取值范围为 0~1，依据未来问答价值，而不是语言复杂度。
-7. 必须输出严格 JSON，不要输出 Markdown，不要添加解释。
-8. 语义记忆与情景记忆必须在一次输出中同时给出，不要要求二次处理。
+Examples:
 
-【输入信息】
-router_level: {router_level}
-information_score: {information_score}
-topic_segment:
+--- Topic 1 ---
+[2022-03-20T13:21:00.000, Sun] 0.User: My name is Alice and I work as a teacher.
+[2022-03-20T13:21:00.500, Sun] 1.User: My favourite movies are Inception and Interstellar.
+--- Topic 2 ---
+[2022-03-20T13:21:01.000, Sun] 2.User: I visited Paris last summer.
+{"data": [
+  {"source_id": 0, "fact": "User's name is Alice."},
+  {"source_id": 0, "fact": "User works as a teacher."},
+  {"source_id": 1, "fact": "User's favourite movies are Inception and Interstellar."},
+  {"source_id": 2, "fact": "User visited Paris last summer."}
+]}
+
+Reminder: Be exhaustive. Unless a message is purely meaningless, extract and output it as a fact.
+
+InfoBudget routing metadata:
+- router_level: {router_level}
+- information_score: {information_score}
+
+Topic segment:
 {segment_text}

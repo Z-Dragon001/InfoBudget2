@@ -23,3 +23,21 @@ def test_lite_topic_seg_produces_segments() -> None:
     segments = segmenter.reindex_segments(segmenter.segment(turns))
     assert len(segments) >= 1
     assert segments[0].segment_id.startswith("seg_")
+
+
+def test_lite_topic_seg_enriches_segment_text_with_blip_caption() -> None:
+    bundle = load_project_bundle("configs")
+    segmenter = LiteTopicSeg(bundle.config.segmentation)
+    turns = [
+        Turn(
+            1,
+            "user",
+            "I visited the gallery today.",
+            count_tokens("I visited the gallery today."),
+            timestamp="2024-01-07T17:24:00.000",
+            metadata={"blip_caption": "a mural with rainbow colors", "weekday": "Sun"},
+        )
+    ]
+    segments = segmenter.reindex_segments(segmenter.segment(turns))
+    assert "[2024-01-07T17:24:00.000, Sun] 0.user:" in segments[0].text
+    assert "image description: a mural with rainbow colors" in segments[0].text

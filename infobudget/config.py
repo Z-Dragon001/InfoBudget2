@@ -27,6 +27,20 @@ class ProjectConfig:
 
 
 @dataclass(slots=True)
+class DatasetConfig:
+    """数据集存储与预处理配置。"""
+
+    root_dir: str
+    raw_dir: str
+    processed_dir: str
+    supported_datasets: list[str]
+    default_splits: list[str]
+    fallback_split_name: str = "full"
+    store_flat_questions: bool = True
+    store_flat_sessions: bool = True
+
+
+@dataclass(slots=True)
 class SegmentationConfig:
     """分段配置。"""
 
@@ -51,7 +65,6 @@ class ScoringConfig:
 
     tokenizer_name: str
     novelty_top_k: int
-    use_faiss: bool
     semantic_embedding_model: str
     episodic_embedding_model: str
     spacy_model: str
@@ -77,6 +90,8 @@ class ExtractorConfig:
     json_mode: bool
     local_backend: str
     api_backend: str
+    fallback_to_mock: bool = True
+    extraction_mode: str = "flat"
 
 
 @dataclass(slots=True)
@@ -84,9 +99,10 @@ class StorageConfig:
     """存储配置。"""
 
     jsonl_dir: str
-    faiss_dir: str
+    qdrant_dir: str
     normalize_embeddings: bool
-    faiss_index_type: str
+    qdrant_memory_collection: str
+    qdrant_episode_collection: str
 
 
 @dataclass(slots=True)
@@ -98,6 +114,14 @@ class EvaluationConfig:
     track_build_stage: bool
     track_qa_stage: bool
     save_predictions: bool
+    qa_mode: str = "llm_qa"
+    answer_model_tier: str = "medium"
+    qa_max_new_tokens: int = 512
+    judge_model: ModelSpec | None = None
+    retrieval_top_k: int = 5
+    locomo_retrieval_top_k: int = 60
+    longmemeval_retrieval_top_k: int = 20
+    save_retrieval_traces: bool = True
 
 
 @dataclass(slots=True)
@@ -114,9 +138,8 @@ class IntrinsicWeights:
 class UtilityWeights:
     """效用指标权重。"""
 
-    semantic_novelty: float
-    entity_novelty: float
-    episodic_novelty: float
+    information_gain: float
+    actionability: float
 
 
 @dataclass(slots=True)
@@ -141,6 +164,7 @@ class AppConfig:
     """应用配置。"""
 
     project: ProjectConfig
+    dataset: DatasetConfig
     segmentation: SegmentationConfig
     scoring: ScoringConfig
     router: RouterConfig
@@ -174,13 +198,22 @@ def _build_app_config(raw: dict[str, Any]) -> AppConfig:
     """构建主配置。"""
     return AppConfig(
         project=ProjectConfig(**raw["project"]),
+        dataset=DatasetConfig(**raw["dataset"]),
         segmentation=SegmentationConfig(**raw["segmentation"]),
         scoring=ScoringConfig(**raw["scoring"]),
         router=RouterConfig(**raw["router"]),
         extractor=ExtractorConfig(**raw["extractor"]),
         storage=StorageConfig(**raw["storage"]),
-        evaluation=EvaluationConfig(**raw["evaluation"]),
+        evaluation=_build_evaluation_config(raw),
     )
+
+
+def _build_evaluation_config(raw: dict[str, Any]) -> EvaluationConfig:
+    """Build evaluation config and hydrate the optional judge model spec."""
+    payload = dict(raw["evaluation"])
+    judge_model_raw = payload.pop("judge_model", None)
+    judge_model = ModelSpec(**judge_model_raw) if isinstance(judge_model_raw, dict) else None
+    return EvaluationConfig(**payload, judge_model=judge_model)
 
 
 def _build_weights(raw: dict[str, Any]) -> WeightConfig:

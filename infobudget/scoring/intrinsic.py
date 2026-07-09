@@ -9,7 +9,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from infobudget.utils.text import clamp01, content_tokens, extract_entities, normalized_entropy, tokenize_text
+from infobudget.utils.text import (
+    clamp01,
+    content_tokens,
+    extract_entities,
+    extract_idea_units,
+    normalized_entropy,
+    tokenize_text,
+)
 
 
 class BaseIntrinsicMetric(ABC):
@@ -50,9 +57,11 @@ class EntityDensityScorer(BaseIntrinsicMetric):
 class ConceptDensityScorer(BaseIntrinsicMetric):
     """概念密度。"""
 
+    def __init__(self, spacy_model: str = ""):
+        self.spacy_model = spacy_model
+
     def compute(self, text: str) -> float:
         tokens = tokenize_text(text)
         if not tokens:
             return 0.0
-        concepts = set(content_tokens(text))
-        return clamp01(len(concepts) / len(tokens))
+        return clamp01(len(extract_idea_units(text, self.spacy_model)) / len(tokens))

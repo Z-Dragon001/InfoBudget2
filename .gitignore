@@ -1,0 +1,54 @@
+# Python bytecode and test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments and local runtime state
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# IDE and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project experiment outputs
+outputs/
+results/
+
+# Local model weights and downloaded artifacts
+models/
+
+# Local dataset material.
+# Keep directory placeholders if they are used, but ignore raw and processed data files.
+datasets/raw/**
+!datasets/raw/**/
+!datasets/raw/**/.gitkeep
+datasets/processed/**
+!datasets/processed/**/
+!datasets/processed/**/.gitkeep
+
+# Local external reference checkouts
+.external_refs/
+
+# Local config/secrets overlays
+configs/*.local.yaml
+configs/*.secret.yaml
+configs/secrets*.yaml
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp

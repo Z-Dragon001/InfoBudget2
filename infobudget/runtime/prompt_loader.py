@@ -1,9 +1,4 @@
-"""功能：加载外置 Prompt 模板。
-输入：Prompt 目录与模板名称。
-输出：模板字符串。
-依赖：pathlib。
-作者：OpenAI Codex
-"""
+"""Load external prompt templates for the InfoBudget runtime."""
 
 from __future__ import annotations
 
@@ -11,7 +6,12 @@ from pathlib import Path
 
 
 def load_prompt(prompt_dir: str | Path, name: str) -> str:
-    """读取 Prompt 模板文件。"""
+    """Read a single prompt template file."""
     path = Path(prompt_dir) / name
     with path.open("r", encoding="utf-8") as handle:
         return handle.read()
+
+
+def load_prompt_map(prompt_dir: str | Path, names: dict[str, str]) -> dict[str, str]:
+    """Read multiple prompt template files keyed by logical prompt name."""
+    return {key: load_prompt(prompt_dir, value) for key, value in names.items()}

@@ -14,7 +14,7 @@ import numpy as np
 from infobudget.config import SegmentationConfig
 from infobudget.schemas import Segment, Turn
 from infobudget.segmentation.base import BaseSegmenter
-from infobudget.utils.embeddings import HashingTextEncoder, cosine_similarity
+from infobudget.utils.embeddings import HashingTextEncoder, TextEncoder, cosine_similarity
 from infobudget.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -30,7 +30,7 @@ class _SegmentState:
 class LiteTopicSeg(BaseSegmenter):
     """默认的 embedding-only 分段器。"""
 
-    def __init__(self, cfg: SegmentationConfig, encoder: HashingTextEncoder | None = None):
+    def __init__(self, cfg: SegmentationConfig, encoder: TextEncoder | None = None):
         self.cfg = cfg
         self.encoder = encoder or HashingTextEncoder()
 
@@ -45,7 +45,7 @@ class LiteTopicSeg(BaseSegmenter):
             segment = self._make_segment(turns, 0, 0, "single_turn", [1.0])
             return self.reindex_segments([segment]), {"method": "lite_topic_seg", "boundaries": [1]}
 
-        embeddings = self.encoder.encode_batch([turn.text for turn in turns])
+        embeddings = self.encoder.encode_batch([turn.memory_text() for turn in turns])
         similarities = [cosine_similarity(embeddings[i - 1], embeddings[i]) for i in range(1, len(turns))]
         smoothed = self._smooth(similarities)
         boundaries, reasons = self._detect_boundaries(smoothed)
@@ -182,6 +182,9 @@ class LiteTopicSeg(BaseSegmenter):
                 if turn_size <= self.cfg.max_segment_turns and token_size <= self.cfg.max_segment_tokens:
                     result.append(current)
                     continue
+                if turn_size <= 1:
+                    result.append(current)
+                    continue
                 split_at = self._choose_split_point(current, turns, smoothed)
                 stack.append(_SegmentState(split_at, current.end, "forced_split"))
                 stack.append(_SegmentState(current.start, split_at - 1, "forced_split"))
@@ -218,7 +221,7 @@ class LiteTopicSeg(BaseSegmenter):
             start_turn=chunk[0].turn_id,
             end_turn=chunk[-1].turn_id,
             turn_ids=[item.turn_id for item in chunk],
-            text="\n".join(f"{item.role}: {item.text}" for item in chunk),
+            text="\n".join(item.memory_line() for item in chunk),
             token_count=sum(item.token_count for item in chunk),
             mean_adjacent_similarity=mean_similarity,
             boundary_reason=reason,

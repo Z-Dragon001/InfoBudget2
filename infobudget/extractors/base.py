@@ -16,23 +16,9 @@ class BaseExtractor(ABC):
     """提取器基类。"""
 
     @abstractmethod
-    def extract(self, segment: Segment, tier: Tier, score_result: ScoreResult) -> MemoryEntry:
+    def extract(self, segment: Segment, tier: Tier, score_result: ScoreResult) -> list[MemoryEntry]:
         """执行记忆提取。"""
 
 
 class JointMemoryExtractor(BaseExtractor):
     """联合提取器抽象基类。"""
-
-
-class LocalJointExtractor(JointMemoryExtractor):
-    """本地联合提取器占位类。"""
-
-    def extract(self, segment: Segment, tier: Tier, score_result: ScoreResult) -> MemoryEntry:
-        raise NotImplementedError("LocalJointExtractor is deferred in InfoBudget v1.0")
-
-
-class APIJointExtractor(JointMemoryExtractor):
-    """API 联合提取器占位类。"""
-
-    def extract(self, segment: Segment, tier: Tier, score_result: ScoreResult) -> MemoryEntry:
-        raise NotImplementedError("APIJointExtractor is deferred in InfoBudget v1.0")

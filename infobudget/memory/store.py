@@ -11,22 +11,9 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-import numpy as np
-
 from infobudget.config import StorageConfig
-from infobudget.memory.vector_index import BaseVectorIndex, NumpyFlatIPIndex
-from infobudget.schemas import (
-    Constraint,
-    Episode,
-    EpisodicMemory,
-    MemoryEntry,
-    Preference,
-    ScoreResult,
-    Segment,
-    SemanticEntity,
-    SemanticFact,
-    SemanticMemory,
-)
+from infobudget.memory.qdrant_index import QdrantVectorIndex
+from infobudget.schemas import MemoryEntry, Segment
 from infobudget.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -38,49 +25,45 @@ class MemoryStore:
 
     cfg: StorageConfig
     root_dir: Path
-    memory_index: BaseVectorIndex = field(default_factory=NumpyFlatIPIndex)
-    episode_index: BaseVectorIndex = field(default_factory=NumpyFlatIPIndex)
     entries: list[MemoryEntry] = field(default_factory=list)
     episode_entries: list[dict] = field(default_factory=list)
     segments: list[Segment] = field(default_factory=list)
     jsonl_dir: Path = field(init=False)
-    faiss_dir: Path = field(init=False)
+    qdrant_dir: Path = field(init=False)
     memory_path: Path = field(init=False)
     episode_path: Path = field(init=False)
     segment_path: Path = field(init=False)
-    memory_index_path: Path = field(init=False)
-    episode_index_path: Path = field(init=False)
+    memory_index: QdrantVectorIndex = field(init=False)
+    episode_index: QdrantVectorIndex = field(init=False)
 
     def __post_init__(self) -> None:
         self.jsonl_dir = (self.root_dir / self.cfg.jsonl_dir).resolve()
-        self.faiss_dir = (self.root_dir / self.cfg.faiss_dir).resolve()
+        self.qdrant_dir = (self.root_dir / self.cfg.qdrant_dir).resolve()
         self.memory_path = self.jsonl_dir / "memory_entries.jsonl"
         self.episode_path = self.jsonl_dir / "episode_entries.jsonl"
         self.segment_path = self.jsonl_dir / "segments.jsonl"
-        self.memory_index_path = self.faiss_dir / "memory.index"
-        self.episode_index_path = self.faiss_dir / "episode.index"
+        self.memory_index = QdrantVectorIndex(self.qdrant_dir, self.cfg.qdrant_memory_collection)
+        self.episode_index = QdrantVectorIndex(self.qdrant_dir, self.cfg.qdrant_episode_collection)
 
-    def add_entry(self, entry: MemoryEntry, embedding: np.ndarray) -> str:
-        entry.memory_id = f"mem_{len(self.entries)+1:06d}"
-        entry.embedding_id = len(self.entries)
+    def add_entry(self, entry: MemoryEntry, embedding) -> str:
         self.entries.append(entry)
-        self.memory_index.add(entry.memory_id, embedding)
-        return entry.memory_id
+        self.memory_index.add(entry.id, embedding, entry.to_dict())
+        return entry.id
 
-    def add_episode(self, episode_entry: dict, embedding: np.ndarray) -> str:
+    def add_episode(self, episode_entry: dict, embedding) -> str:
         episode_id = f"epi_{len(self.episode_entries)+1:06d}"
         payload = {"episode_id": episode_id, **episode_entry}
         self.episode_entries.append(payload)
-        self.episode_index.add(episode_id, embedding)
+        self.episode_index.add(episode_id, embedding, payload)
         return episode_id
 
     def record_segments(self, segments: list[Segment]) -> None:
         self.segments = list(segments)
 
-    def retrieve(self, query_embedding: np.ndarray, top_k: int = 5) -> list[MemoryEntry]:
+    def retrieve(self, query_embedding, top_k: int = 5) -> list[MemoryEntry]:
         return [entry for entry, _score in self.search_by_embedding(query_embedding, top_k)]
 
-    def search_by_embedding(self, query_embedding: np.ndarray, top_k: int = 5) -> list[tuple[MemoryEntry, float]]:
+    def search_by_embedding(self, query_embedding, top_k: int = 5) -> list[tuple[MemoryEntry, float]]:
         hits = self.memory_index.search(query_embedding, top_k)
         by_id = {entry.memory_id: entry for entry in self.entries}
         return [(by_id[item_id], score) for item_id, score in hits if item_id in by_id]
@@ -88,22 +71,34 @@ class MemoryStore:
     def is_empty(self) -> bool:
         return len(self.entries) == 0
 
+    def needs_index_rebuild(self) -> bool:
+        """Return true when JSONL memories and Qdrant points are out of sync."""
+        return bool(self.entries) and self.memory_index.count() != len(self.entries)
+
+    def rebuild_indexes(self, encoder) -> None:
+        """Rebuild Qdrant indexes from JSONL-backed entries."""
+        self.memory_index.reset()
+        self.episode_index.reset()
+        for entry in self.entries:
+            self.memory_index.add(entry.id, encoder.encode_text(entry.memory), entry.to_dict())
+        logger.info("Memory indexes rebuilt from %s JSONL entries", len(self.entries))
+
     def save(self) -> None:
         self.jsonl_dir.mkdir(parents=True, exist_ok=True)
-        self.faiss_dir.mkdir(parents=True, exist_ok=True)
+        self.qdrant_dir.mkdir(parents=True, exist_ok=True)
         self._write_jsonl(self.memory_path, [entry.to_dict() for entry in self.entries])
         self._write_jsonl(self.episode_path, self.episode_entries)
         self._write_jsonl(self.segment_path, [asdict(segment) for segment in self.segments])
-        self.memory_index.save(self.memory_index_path)
-        self.episode_index.save(self.episode_index_path)
+        self.memory_index.save()
+        self.episode_index.save()
         logger.info("Memory store saved %s entries", len(self.entries))
 
     def load(self) -> None:
         self.entries = [self._memory_from_dict(item) for item in self._read_jsonl(self.memory_path)]
         self.episode_entries = self._read_jsonl(self.episode_path)
         self.segments = [Segment(**item) for item in self._read_jsonl(self.segment_path)]
-        self.memory_index.load(self.memory_index_path)
-        self.episode_index.load(self.episode_index_path)
+        self.memory_index.load()
+        self.episode_index.load()
 
     @staticmethod
     def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -120,32 +115,19 @@ class MemoryStore:
 
     @staticmethod
     def _memory_from_dict(raw: dict) -> MemoryEntry:
-        semantic = raw["semantic_memory"]
-        episodic = raw["episodic_memory"]
         return MemoryEntry(
-            memory_id=raw["memory_id"],
-            segment_id=raw["segment_id"],
-            topic=raw["topic"],
-            summary=raw["summary"],
-            semantic_memory=SemanticMemory(
-                entities=[SemanticEntity(**item) for item in semantic["entities"]],
-                facts=[SemanticFact(**item) for item in semantic["facts"]],
-                preferences=[Preference(**item) for item in semantic["preferences"]],
-                constraints=[Constraint(**item) for item in semantic["constraints"]],
-            ),
-            episodic_memory=EpisodicMemory(
-                episodes=[Episode(**item) for item in episodic["episodes"]]
-            ),
-            importance=raw["importance"],
-            information_score=raw["information_score"],
-            router_level=raw["router_level"],
-            extraction_mode=raw["extraction_mode"],
-            extractor_name=raw["extractor_name"],
-            model_used=raw["model_used"],
-            input_tokens=raw["input_tokens"],
-            output_tokens=raw["output_tokens"],
-            latency_ms=raw["latency_ms"],
-            cost_usd=raw["cost_usd"],
-            created_at=raw["created_at"],
-            embedding_id=raw["embedding_id"],
+            id=raw.get("id", raw.get("memory_id", "")),
+            time_stamp=raw.get("time_stamp", ""),
+            float_time_stamp=float(raw.get("float_time_stamp", 0.0) or 0.0),
+            weekday=raw.get("weekday", ""),
+            topic_id=int(raw.get("topic_id", 0) or 0),
+            topic_summary=raw.get("topic_summary", ""),
+            memory=raw.get("memory", raw.get("summary", "")),
+            original_memory=raw.get("original_memory", ""),
+            compressed_memory=raw.get("compressed_memory", ""),
+            entry_type=raw.get("entry_type", "factual"),
+            speaker_id=raw.get("speaker_id", "unknown"),
+            speaker_name=raw.get("speaker_name", "User"),
+            consolidated=bool(raw.get("consolidated", False)),
+            update_queue=raw.get("update_queue", []),
         )

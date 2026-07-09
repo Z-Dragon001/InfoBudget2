@@ -5,9 +5,8 @@ scoring:
     entity_density: 0.25
     concept_density: 0.25
   utility:
-    semantic_novelty: 0.40
-    entity_novelty: 0.25
-    episodic_novelty: 0.35
+    information_gain: 0.60
+    actionability: 0.40
   fusion:
     intrinsic_weight: 0.50
     utility_weight: 0.50
