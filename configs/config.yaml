@@ -70,8 +70,8 @@ evaluation:
     backend: "openai_compatible"
     model_name: "gpt-4o-mini"
     tokenizer_name: "gpt-4o-mini"
-    api_base_url: "https://api.openai.com/v1"
-    api_key: "${OPENAI_API_KEY}"
+    api_base_url: "https://api.apimart.ai/v1"
+    api_key: "sk-TjHqi8d6CQKlJvbhqFJGiWIYlIC20GZtrZBuRLcoxpzHjxdY"
     api_key_env: "OPENAI_API_KEY"
     request_model_name: "gpt-4o-mini"
     max_context_tokens: 128000
