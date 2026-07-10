@@ -64,12 +64,16 @@ class MemoryStore:
         return [entry for entry, _score in self.search_by_embedding(query_embedding, top_k)]
 
     def search_by_embedding(self, query_embedding, top_k: int = 5) -> list[tuple[MemoryEntry, float]]:
+        payload_hits = self.memory_index.search_with_payload(query_embedding, top_k)
+        if payload_hits:
+            return [(self._memory_from_dict(payload), score) for payload, score in payload_hits]
+
         hits = self.memory_index.search(query_embedding, top_k)
         by_id = {entry.memory_id: entry for entry in self.entries}
         return [(by_id[item_id], score) for item_id, score in hits if item_id in by_id]
 
     def is_empty(self) -> bool:
-        return len(self.entries) == 0
+        return len(self.entries) == 0 and self.memory_index.is_empty()
 
     def needs_index_rebuild(self) -> bool:
         """Return true when JSONL memories and Qdrant points are out of sync."""
@@ -130,4 +134,9 @@ class MemoryStore:
             speaker_name=raw.get("speaker_name", "User"),
             consolidated=bool(raw.get("consolidated", False)),
             update_queue=raw.get("update_queue", []),
+            source_segment_id=raw.get("source_segment_id", ""),
+            source_turn_id=int(raw.get("source_turn_id", 0) or 0),
+            source_turn_ids=[int(item) for item in raw.get("source_turn_ids", []) if str(item).isdigit()],
+            source_start_turn=int(raw.get("source_start_turn", 0) or 0),
+            source_end_turn=int(raw.get("source_end_turn", 0) or 0),
         )

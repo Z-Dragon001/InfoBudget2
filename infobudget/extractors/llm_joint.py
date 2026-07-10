@@ -293,6 +293,7 @@ def memory_entries_from_payload(
         source_id = _int(item.get("source_id"), segment.start_turn - 1)
         source = source_map.get(source_id) or source_map.get(segment.start_turn - 1) or {}
         time_stamp = source.get("time_stamp", "")
+        source_turn_id = source_id + 1 if source_id >= 0 else 0
         entries.append(
             MemoryEntry(
                 time_stamp=time_stamp,
@@ -308,6 +309,11 @@ def memory_entries_from_payload(
                 speaker_name=source.get("speaker_name", "User"),
                 consolidated=False,
                 update_queue=[],
+                source_segment_id=segment.segment_id,
+                source_turn_id=source_turn_id,
+                source_turn_ids=list(segment.turn_ids),
+                source_start_turn=segment.start_turn,
+                source_end_turn=segment.end_turn,
             )
         )
     return entries

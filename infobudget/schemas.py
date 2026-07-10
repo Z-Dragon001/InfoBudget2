@@ -215,6 +215,11 @@ class MemoryEntry:
     speaker_name: str = "User"
     consolidated: bool = False
     update_queue: list[Any] = field(default_factory=list)
+    source_segment_id: str = ""
+    source_turn_id: int = 0
+    source_turn_ids: list[int] = field(default_factory=list)
+    source_start_turn: int = 0
+    source_end_turn: int = 0
 
     @property
     def memory_id(self) -> str:
@@ -233,6 +238,8 @@ class MemoryEntry:
     @property
     def segment_id(self) -> str:
         """Best-effort segment id reconstructed from LightMem topic_id."""
+        if self.source_segment_id:
+            return self.source_segment_id
         return f"seg_{self.topic_id + 1:06d}"
 
     @property

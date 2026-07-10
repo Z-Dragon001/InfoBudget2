@@ -43,6 +43,14 @@ class QdrantVectorIndex:
         )
 
     def search(self, query_vector: np.ndarray, top_k: int = 5) -> list[tuple[str, float]]:
+        """Return external item ids and similarity scores for a query vector."""
+        return [
+            (str(payload.get("item_id", "")), score)
+            for payload, score in self.search_with_payload(query_vector, top_k)
+        ]
+
+    def search_with_payload(self, query_vector: np.ndarray, top_k: int = 5) -> list[tuple[dict[str, Any], float]]:
+        """Return Qdrant payloads and similarity scores for a query vector."""
         if self.is_empty():
             return []
         query = self._as_float_vector(query_vector)
@@ -53,11 +61,12 @@ class QdrantVectorIndex:
             with_payload=True,
             with_vectors=False,
         )
-        results: list[tuple[str, float]] = []
+        results: list[tuple[dict[str, Any], float]] = []
         for point in response.points:
             payload = point.payload or {}
-            item_id = str(payload.get("item_id", point.id))
-            results.append((item_id, float(point.score)))
+            if "item_id" not in payload:
+                payload = {"item_id": str(point.id), **payload}
+            results.append((payload, float(point.score)))
         return results
 
     def save(self) -> None:

@@ -18,6 +18,9 @@ from infobudget.runtime.pipeline import InfoBudgetPipeline
 from infobudget.schemas import CostLogEntry, DatasetDialogueExample, RetrievalTrace, Tier
 from infobudget.scoring.modes import ScoringMode, normalize_scoring_mode
 from infobudget.utils.embeddings import build_text_encoder
+from infobudget.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -336,14 +339,22 @@ class DatasetEvaluationRunner:
         storage_cfg = replace(self.bundle.config.storage, jsonl_dir="memory_jsonl", qdrant_dir="qdrant")
         store = MemoryStore(storage_cfg, self.sample_memory_dir(dataset_name, split, sample_id))
         store.load()
-        if store.is_empty():
+        if store.memory_index.is_empty():
             raise FileNotFoundError(
-                f"missing memory store for {dataset_name}/{split}/{self.scoring_mode}/{sample_id}; "
+                f"missing Qdrant memory index for {dataset_name}/{split}/{self.scoring_mode}/{sample_id}; "
                 "run scripts/build_dataset_memory.py first"
             )
         if store.needs_index_rebuild():
-            store.rebuild_indexes(self.encoder)
-            store.save()
+            logger.warning(
+                "Qdrant memory index count (%s) differs from JSONL memory count (%s) for %s/%s/%s/%s; "
+                "using Qdrant payloads for QA retrieval without rebuilding from JSONL",
+                store.memory_index.count(),
+                len(store.entries),
+                dataset_name,
+                split,
+                self.scoring_mode,
+                sample_id,
+            )
         return store
 
     def _load_cost_logs(self, dataset_name: str, split: str, sample_id: str) -> list[CostLogEntry]:
@@ -397,6 +408,10 @@ class DatasetEvaluationRunner:
         retrieved_summaries = [entry.memory for entry in retrieved_entries]
         retrieved_memory_ids = [entry.memory_id for entry in retrieved_entries]
         segment_lookup = {segment.segment_id: segment for segment in segments}
+        session_turns = {
+            session.session_id: {turn.turn_id for turn in session.turns}
+            for session in example.sessions
+        }
 
         matched_sessions: set[str] = set()
         for session in example.sessions:
@@ -409,20 +424,18 @@ class DatasetEvaluationRunner:
         evidence_hit = False
         if qa_pair.evidence_turn_ids:
             evidence_turn_set = set(qa_pair.evidence_turn_ids)
-            for segment_id in retrieved_segment_ids:
-                segment = segment_lookup.get(segment_id)
-                if segment and evidence_turn_set & set(segment.turn_ids):
+            for entry in retrieved_entries:
+                source_turn_ids = _entry_turn_ids(entry, segment_lookup)
+                if evidence_turn_set & source_turn_ids:
                     evidence_hit = True
                     break
         elif evidence_scope:
-            for segment_id in retrieved_segment_ids:
-                segment = segment_lookup.get(segment_id)
-                if not segment:
-                    continue
+            for entry in retrieved_entries:
+                source_turn_ids = _entry_turn_ids(entry, segment_lookup)
                 segment_session_ids = {
-                    session.session_id
-                    for session in example.sessions
-                    if set(session_turn.turn_id for session_turn in session.turns) & set(segment.turn_ids)
+                    session_id
+                    for session_id, turn_ids in session_turns.items()
+                    if turn_ids & source_turn_ids
                 }
                 if segment_session_ids & evidence_scope:
                     evidence_hit = True
@@ -443,3 +456,12 @@ class DatasetEvaluationRunner:
                 "category": qa_pair.category,
             },
         )
+
+
+def _entry_turn_ids(entry, segment_lookup: dict) -> set[int]:
+    if getattr(entry, "source_turn_ids", None):
+        return {int(item) for item in entry.source_turn_ids}
+    if getattr(entry, "source_turn_id", 0):
+        return {int(entry.source_turn_id)}
+    segment = segment_lookup.get(entry.segment_id)
+    return set(segment.turn_ids) if segment else set()

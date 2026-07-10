@@ -106,6 +106,7 @@ def _entry_from_line(line: str, segment: Segment, entry_type: str) -> MemoryEntr
         return None
     time_stamp = match.group("time").strip()
     speaker = match.group("speaker").strip()
+    source_id = int(match.group("source_id"))
     if entry_type == "relational":
         memory = f"{speaker} engaged in the conversation about: {content}"
     else:
@@ -120,6 +121,11 @@ def _entry_from_line(line: str, segment: Segment, entry_type: str) -> MemoryEntr
         entry_type=entry_type,
         speaker_id=speaker.lower() or "unknown",
         speaker_name=speaker or "User",
+        source_segment_id=segment.segment_id,
+        source_turn_id=source_id + 1,
+        source_turn_ids=list(segment.turn_ids),
+        source_start_turn=segment.start_turn,
+        source_end_turn=segment.end_turn,
     )
 
 
