@@ -1,24 +1,50 @@
 models:
+  # Previous local small model configuration:
+  # small:
+  #   deploy: "local"
+  #   backend: "vllm"
+  #   model_name: "Qwen/Qwen2.5-7B-Instruct"
+  #   tokenizer_name: "Qwen/Qwen2.5-7B-Instruct"
+  #   api_base_url: "http://localhost:8001/v1"
+  #   api_key: "EMPTY"
+  #   max_context_tokens: 32768
+  #   tensor_parallel_size: 1
+  #   dtype: "float16"
   small:
-    deploy: "local"
-    backend: "vllm"
+    deploy: "api"
+    backend: "openai_compatible"
     model_name: "Qwen/Qwen2.5-7B-Instruct"
     tokenizer_name: "Qwen/Qwen2.5-7B-Instruct"
-    api_base_url: "http://localhost:8001/v1"
-    api_key: "EMPTY"
+    api_base_url: "https://api.siliconflow.cn/v1"
+    api_key: "sk-fvvljjkeduuvchifpwosqjkgqlrbrkizuzyceutjekwraedw"
+    api_key_env: "SMALL_MODEL_API_KEY"
+    request_model_name: "Qwen/Qwen2.5-7B-Instruct"
     max_context_tokens: 32768
     tensor_parallel_size: 1
-    dtype: "float16"
+    dtype: "n/a"
+  # Previous local medium model configuration:
+  # medium:
+  #   deploy: "local"
+  #   backend: "vllm"
+  #   model_name: "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
+  #   tokenizer_name: "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
+  #   api_base_url: "http://localhost:8002/v1"
+  #   api_key: "EMPTY"
+  #   max_context_tokens: 32768
+  #   tensor_parallel_size: 2
+  #   dtype: "fp8"
   medium:
-    deploy: "local"
-    backend: "vllm"
-    model_name: "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
-    tokenizer_name: "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
-    api_base_url: "http://localhost:8002/v1"
-    api_key: "EMPTY"
+    deploy: "api"
+    backend: "openai_compatible"
+    model_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    tokenizer_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    api_base_url: "https://api.siliconflow.cn/v1"
+    api_key: "sk-rzklcjhshmqiyimdauzdvaeosikfybxesmlwsoxoxwcershb"
+    api_key_env: "MEDIUM_MODEL_API_KEY"
+    request_model_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
     max_context_tokens: 32768
-    tensor_parallel_size: 2
-    dtype: "fp8"
+    tensor_parallel_size: 1
+    dtype: "n/a"
   large:
     deploy: "api"
     backend: "openai_compatible"
