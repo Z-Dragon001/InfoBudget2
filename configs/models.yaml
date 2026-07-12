@@ -50,7 +50,7 @@ models:
     backend: "openai_compatible"
     model_name: "qwen/qwen3-next-80b-a3b-instruct"
     tokenizer_name: "qwen/qwen3-next-80b-a3b-instruct"
-    api_base_url: "https://api.novita.ai/openai/v1"
+    api_base_url: "https://api.novita.ai/openai"
     api_key: "sk_UGrG5j2iYX4Gkanuz7HdmsB-rFcKiOjvoOV7g58eAJs"
     api_key_env: "DASHSCOPE_API_KEY"
     request_model_name: "qwen/qwen3-next-80b-a3b-instruct"

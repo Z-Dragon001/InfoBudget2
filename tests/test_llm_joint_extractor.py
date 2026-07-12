@@ -12,6 +12,7 @@ from infobudget.extractors.llm_joint import (
     LLMResponse,
     LocalJointExtractor,
     TieredJointExtractor,
+    parse_chat_completion_response,
 )
 from infobudget.extractors.mock_joint import MockJointExtractor
 from infobudget.runtime.model_registry import ModelRegistry, PriceRegistry
@@ -186,3 +187,42 @@ def test_event_mode_calls_factual_and_relational_prompts(tmp_path: Path) -> None
     assert client.models == [bundle.models["large"].model_name, bundle.models["large"].model_name]
     assert [entry.entry_type for entry in entries] == ["factual", "relational"]
     assert [log.extraction_mode for log in cost_logger.logs] == ["event_factual", "event_relational"]
+
+
+def test_parse_chat_completion_response_accepts_plain_json() -> None:
+    parsed = parse_chat_completion_response(
+        json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "OK",
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+            }
+        )
+    )
+
+    assert parsed["choices"][0]["message"]["content"] == "OK"
+    assert parsed["usage"]["prompt_tokens"] == 3
+
+
+def test_parse_chat_completion_response_accepts_sse_chunks() -> None:
+    raw = "\n\n".join(
+        [
+            'data: {"choices":[{"delta":{"role":"assistant","content":""},"finish_reason":null}],"usage":null}',
+            'data: {"choices":[{"delta":{"content":"O"},"finish_reason":null}],"usage":null}',
+            'data: {"choices":[{"delta":{"content":"K"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}',
+            "data: [DONE]",
+        ]
+    )
+
+    parsed = parse_chat_completion_response(raw)
+
+    assert parsed["choices"][0]["message"]["role"] == "assistant"
+    assert parsed["choices"][0]["message"]["content"] == "OK"
+    assert parsed["choices"][0]["finish_reason"] == "stop"
+    assert parsed["usage"]["completion_tokens"] == 1

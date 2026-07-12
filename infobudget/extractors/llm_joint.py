@@ -52,6 +52,8 @@ class OpenAICompatibleClient:
     """Small standard-library client for OpenAI-compatible chat completions."""
 
     timeout_seconds: int = 120
+    max_retries: int = 3
+    retry_backoff_seconds: float = 1.0
 
     def complete(
         self,
@@ -78,20 +80,19 @@ class OpenAICompatibleClient:
             payload["response_format"] = {"type": "json_object"}
 
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "OpenAI/Python 1.0.0",
+        }
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
         start = time.perf_counter()
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                raw = response.read().decode("utf-8")
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise LLMExtractionError(f"LLM request failed for {model_spec.model_name}: {exc}") from exc
+        raw = self._post_with_retries(url, data, headers, model_spec.model_name)
 
         latency_ms = max(1, int((time.perf_counter() - start) * 1000))
         try:
-            parsed = json.loads(raw)
+            parsed = parse_chat_completion_response(raw)
             content = parsed["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise LLMExtractionError("LLM response does not match chat-completions schema") from exc
@@ -107,6 +108,85 @@ class OpenAICompatibleClient:
             output_tokens=output_tokens,
             latency_ms=latency_ms,
         )
+
+    def _post_with_retries(self, url: str, data: bytes, headers: dict[str, str], model_name: str) -> str:
+        last_error: BaseException | None = None
+        for attempt in range(self.max_retries + 1):
+            request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                    return response.read().decode("utf-8")
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace").strip()
+                detail = f"HTTP {exc.code}: {body[:500]}" if body else f"HTTP {exc.code}"
+                if exc.code not in {408, 429, 500, 502, 503, 504} or attempt >= self.max_retries:
+                    raise LLMExtractionError(f"LLM request failed for {model_name}: {detail}") from exc
+                last_error = exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if attempt >= self.max_retries:
+                    raise LLMExtractionError(f"LLM request failed for {model_name}: {exc}") from exc
+                last_error = exc
+            time.sleep(self.retry_backoff_seconds * (2**attempt))
+        raise LLMExtractionError(f"LLM request failed for {model_name}: {last_error}")
+
+
+def parse_chat_completion_response(raw: str) -> dict[str, Any]:
+    """Parse either ordinary OpenAI JSON or SSE chat-completion chunks."""
+    text = raw.strip()
+    if not text.startswith("data:"):
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise TypeError("chat completion response must be a JSON object")
+        return parsed
+
+    chunks: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("data:"):
+            continue
+        payload = stripped.removeprefix("data:").strip()
+        if not payload or payload == "[DONE]":
+            continue
+        chunk = json.loads(payload)
+        if isinstance(chunk, dict):
+            chunks.append(chunk)
+    if not chunks:
+        raise ValueError("empty SSE chat completion response")
+
+    content_parts: list[str] = []
+    role = "assistant"
+    finish_reason = None
+    usage = None
+    for chunk in chunks:
+        if chunk.get("usage") is not None:
+            usage = chunk.get("usage")
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        choice = choices[0]
+        finish_reason = choice.get("finish_reason") or finish_reason
+        delta = choice.get("delta") or {}
+        message = choice.get("message") or {}
+        if isinstance(delta, dict):
+            role = delta.get("role") or role
+            if isinstance(delta.get("content"), str):
+                content_parts.append(delta["content"])
+        if isinstance(message, dict):
+            role = message.get("role") or role
+            if isinstance(message.get("content"), str):
+                content_parts.append(message["content"])
+
+    merged = dict(chunks[-1])
+    merged["choices"] = [
+        {
+            "index": 0,
+            "message": {"role": role, "content": "".join(content_parts)},
+            "finish_reason": finish_reason,
+        }
+    ]
+    if usage is not None:
+        merged["usage"] = usage
+    return merged
 
 
 @dataclass(slots=True)
