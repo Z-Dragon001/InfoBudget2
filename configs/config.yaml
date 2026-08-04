@@ -1,7 +1,6 @@
 project:
   name: "InfoBudget"
   seed: 42
-  log_dir: "./outputs/logs"
   output_dir: "./outputs"
 
 dataset:
@@ -13,14 +12,19 @@ dataset:
   fallback_split_name: "full"
   store_flat_questions: true
   store_flat_sessions: true
+  store_flat_turns: true
+  schema_version: "processed_v3"
 
 segmentation:
-  method: "lite_topic_seg"
-  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
-  similarity_threshold: 0.72
-  drop_threshold: 0.12
-  enable_smoothing: true
-  smooth_alpha: 0.6
+  # nsp_text_tiling | bert_mlp_text_tiling
+  method: "nsp_text_tiling"
+  preserve_session_boundaries: true
+  bert_model_dir: "./seg_models/bert-base-uncased"
+  bert_mlp_checkpoint: "./seg_models/bert_mlp/best.pt"
+  bert_max_length: 128
+  bert_batch_size: 16
+  adaptive_alpha: 0.5
+  bert_mlp_activation: "relu"
   min_boundary_gap: 1
   min_segment_turns: 2
   min_segment_tokens: 20
@@ -28,59 +32,3 @@ segmentation:
   max_segment_tokens: 768
   merge_short_segment: true
   trace_enabled: true
-
-scoring:
-  tokenizer_name: "hashing-tokenizer-v1"
-  novelty_top_k: 5
-  semantic_embedding_model: "hashing-encoder-v1"
-  episodic_embedding_model: "hashing-encoder-v1"
-  spacy_model: ""
-
-router:
-  method: "fixed_percentile_router"
-  p33: 0.38
-  p67: 0.71
-  deferred_fit: true
-  trace_enabled: true
-
-extractor:
-  mode: "joint"
-  max_new_tokens: 1024
-  json_mode: false
-  local_backend: "vllm"
-  api_backend: "openai_compatible"
-  fallback_to_mock: false
-  extraction_mode: "flat"
-
-storage:
-  jsonl_dir: "./outputs/memory_jsonl"
-  qdrant_dir: "./outputs/qdrant"
-  normalize_embeddings: true
-  qdrant_memory_collection: "memories"
-  qdrant_episode_collection: "episodes"
-
-evaluation:
-  datasets: ["locomo", "longmemeval"]
-  judge_mode: "llm_judge"
-  qa_mode: "llm_qa"
-  answer_model_tier: "medium"
-  qa_max_new_tokens: 512
-  judge_model:
-    deploy: "api"
-    backend: "openai_compatible"
-    model_name: "gpt-4o-mini"
-    tokenizer_name: "gpt-4o-mini"
-    api_base_url: "https://api.apimart.ai/v1"
-    api_key: "sk-TjHqi8d6CQKlJvbhqFJGiWIYlIC20GZtrZBuRLcoxpzHjxdY"
-    api_key_env: "OPENAI_API_KEY"
-    request_model_name: "gpt-4o-mini"
-    max_context_tokens: 128000
-    tensor_parallel_size: 1
-    dtype: "n/a"
-  track_build_stage: true
-  track_qa_stage: true
-  save_predictions: true
-  retrieval_top_k: 5
-  locomo_retrieval_top_k: 60
-  longmemeval_retrieval_top_k: 20
-  save_retrieval_traces: true

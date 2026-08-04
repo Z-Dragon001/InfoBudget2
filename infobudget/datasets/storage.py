@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -41,6 +42,7 @@ class DatasetArtifactStore:
         samples_path = split_dir / "samples.jsonl"
         questions_path = split_dir / "questions.jsonl"
         sessions_path = split_dir / "sessions.jsonl"
+        turns_path = split_dir / "turns.jsonl"
         manifest_path = split_dir / "manifest.json"
 
         self._write_jsonl(samples_path, [example.to_dict() for example in examples])
@@ -48,19 +50,25 @@ class DatasetArtifactStore:
             self._write_jsonl(questions_path, list(self._flatten_questions(examples)))
         if self.cfg.store_flat_sessions:
             self._write_jsonl(sessions_path, list(self._flatten_sessions(examples)))
+        if self.cfg.store_flat_turns:
+            self._write_jsonl(turns_path, list(self._flatten_turns(examples)))
 
         manifest = {
             "dataset_name": dataset_name,
             "split": split,
-            "layout_version": 2,
+            "layout_version": 3,
+            "schema_version": self.cfg.schema_version,
             "num_samples": len(examples),
             "num_questions": sum(len(example.qa_pairs) for example in examples),
             "num_sessions": sum(len(example.sessions) for example in examples),
+            "num_turns": sum(len(example.dialogue) for example in examples),
             "raw_files": raw_files or [],
+            "source_file_hashes": self._source_hashes(raw_files or []),
             "files": {
                 "samples": str(samples_path),
                 "questions": str(questions_path),
                 "sessions": str(sessions_path),
+                "turns": str(turns_path),
             },
             "metadata": metadata or {},
         }
@@ -83,15 +91,18 @@ class DatasetArtifactStore:
         samples_path = split_dir / "samples.jsonl"
         questions_path = split_dir / "questions.jsonl"
         sessions_path = split_dir / "sessions.jsonl"
+        turns_path = split_dir / "turns.jsonl"
         manifest_path = split_dir / "manifest.json"
 
         num_samples = 0
         num_questions = 0
         num_sessions = 0
+        num_turns = 0
         with (
             samples_path.open("w", encoding="utf-8") as sample_handle,
             questions_path.open("w", encoding="utf-8") as question_handle,
             sessions_path.open("w", encoding="utf-8") as session_handle,
+            turns_path.open("w", encoding="utf-8") as turn_handle,
         ):
             for example in examples:
                 sample_handle.write(json.dumps(example.to_dict(), ensure_ascii=False) + "\n")
@@ -130,19 +141,29 @@ class DatasetArtifactStore:
                         num_sessions += 1
                 else:
                     num_sessions += len(example.sessions)
+                if self.cfg.store_flat_turns:
+                    for row in self._turn_rows(example):
+                        turn_handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                        num_turns += 1
+                else:
+                    num_turns += len(example.dialogue)
 
         manifest = {
             "dataset_name": dataset_name,
             "split": split,
-            "layout_version": 2,
+            "layout_version": 3,
+            "schema_version": self.cfg.schema_version,
             "num_samples": num_samples,
             "num_questions": num_questions,
             "num_sessions": num_sessions,
+            "num_turns": num_turns,
             "raw_files": raw_files or [],
+            "source_file_hashes": self._source_hashes(raw_files or []),
             "files": {
                 "samples": str(samples_path),
                 "questions": str(questions_path),
                 "sessions": str(sessions_path),
+                "turns": str(turns_path),
             },
             "metadata": metadata or {},
         }
@@ -177,3 +198,43 @@ class DatasetArtifactStore:
                     "sample_id": example.sample_id,
                     **asdict(session),
                 }
+
+    @classmethod
+    def _flatten_turns(cls, examples: list[DatasetDialogueExample]):
+        for example in examples:
+            yield from cls._turn_rows(example)
+
+    @staticmethod
+    def _turn_rows(example: DatasetDialogueExample):
+        for session in example.sessions:
+            for turn in session.turns:
+                value = asdict(turn)
+                metadata = value.pop("metadata")
+                yield {
+                    "dataset_name": example.dataset_name,
+                    "split": example.split,
+                    "sample_id": example.sample_id,
+                    "session_id": session.session_id,
+                    **value,
+                    "raw_text": metadata.get("raw_text", turn.text),
+                    "segmentation_text": metadata.get("segmentation_text", turn.text),
+                    "rendered_line": turn.memory_line(),
+                    "weekday": metadata.get("weekday"),
+                    "timestamp_source": metadata.get("timestamp_source"),
+                    "timestamp_offset_ms": metadata.get("timestamp_offset_ms", 0),
+                    "metadata": metadata,
+                }
+
+    @staticmethod
+    def _source_hashes(paths: list[str]) -> dict[str, str]:
+        hashes = {}
+        for raw in paths:
+            path = Path(raw)
+            if not path.is_file():
+                continue
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            hashes[path.name] = digest.hexdigest()
+        return hashes

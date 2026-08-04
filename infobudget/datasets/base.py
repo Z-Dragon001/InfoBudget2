@@ -143,7 +143,10 @@ def normalize_turns(raw_turns: list[Any]) -> list[Turn]:
     turns: list[Turn] = []
     for index, item in enumerate(raw_turns, start=1):
         if isinstance(item, dict):
-            text = str(item.get("text") or item.get("content") or item.get("utterance") or "")
+            raw_text = str(item.get("text") or item.get("content") or item.get("utterance") or "")
+            caption = str(item.get("blip_caption") or "").strip()
+            suffix = f" (image description: {caption})" if caption else ""
+            text = raw_text if not caption or raw_text.endswith(suffix) else raw_text + suffix
             role = str(item.get("role") or item.get("speaker") or item.get("from") or "unknown")
             timestamp = item.get("timestamp")
             token_count = int(item.get("token_count") or count_tokens(text))
@@ -162,6 +165,14 @@ def normalize_turns(raw_turns: list[Any]) -> list[Turn]:
                     "token_count",
                 }
             }
+            metadata.update(
+                {
+                    "raw_text": raw_text,
+                    "segmentation_text": text,
+                    "blip_caption": caption,
+                    "image_description_appended": bool(caption),
+                }
+            )
         else:
             text = str(item)
             role = "unknown"
@@ -286,6 +297,7 @@ def build_sessions_from_flat_turns(
                     turn.timestamp = turn_dt.isoformat(timespec="milliseconds")
                     turn.metadata.setdefault("weekday", turn_dt.strftime("%a"))
                     turn.metadata.setdefault("timestamp_source", "synthetic_turn_from_session")
+                    turn.metadata.setdefault("timestamp_offset_ms", turn_offset * turn_timestamp_step_ms)
                 else:
                     turn.timestamp = parsed_timestamp
                     if base_dt is not None:
@@ -295,6 +307,9 @@ def build_sessions_from_flat_turns(
             turn.metadata.setdefault("session_timestamp", parsed_timestamp)
             turn.metadata.setdefault("session_raw_timestamp", raw_timestamp)
             turn.turn_id = next_turn_id
+            turn.metadata.setdefault("display_turn_index", next_turn_id - 1)
+            turn.metadata.setdefault("session_turn_index", turn_offset)
+            turn.metadata.setdefault("segmentation_text", turn.text)
             next_turn_id += 1
         sessions.append(
             DatasetSession(

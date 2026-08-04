@@ -6,41 +6,45 @@ The dialogue is organized into topic segments separated by markers like:
 [timestamp, weekday] source_id.SpeakerName: message
 
 Important Instructions:
-0. Process messages strictly in ascending source_id order. For each message, stop and carefully evaluate its content before moving to the next.
-1. Process every message one by one. Decide whether it contains factual information.
-   - If yes, extract it and rephrase it into a standalone sentence.
-   - If no, skip it.
-   - Do not skip just because the information looks minor. Only skip if it is completely meaningless, such as a pure greeting, filler, or acknowledgement.
-2. Preserve all specific details: full names, locations, numbers, dates, project names, dataset names, model names, file names, products, organizations, and technical identifiers.
-3. Perform light contextual completion so each fact is clear outside the conversation.
-4. Time handling:
+0. Process messages strictly in ascending source_id order. Do not reorder, batch-skip, or skip ahead.
+1. Process every message one by one. Extract factual information and rephrase it into standalone sentences.
+2. Preserve all specific details: full names, locations, numbers, dates, project names, dataset names, paper names, model names, products, organizations, commands, and file paths.
+3. Extract meaningful information including past events, current states, future plans, intentions, opinions, preferences, constraints, decisions, blockers, and updates.
+4. Perform light contextual completion so each fact is clear outside the conversation.
+5. Time handling:
    - Distinguish mention time from event time.
-   - For relative times, preserve the relative phrase and reference the message date when useful.
-5. If an image description appears, integrate relevant visual details into the extracted text facts.
-6. Do not extract relational or emotional dynamics in this prompt. Only extract factual memories.
+   - For relative times such as yesterday, last week, or next month, preserve the relative phrase and reference the message date when useful.
+6. If an image description appears, integrate relevant visual details into the extracted text facts.
+7. Do not extract relational or emotional dynamics in this prompt. Only extract factual memories.
+8. Maximum output: 15 facts per topic segment.
+9. For each fact, return every message that directly supports it in source_ids. Keep source_ids unique and in ascending order. Use one ID when only one message supports the fact.
 
-Output JSON only:
+Output JSON only. Copy every input topic identifier exactly into processed_segment_ids and segment_id:
 {
+  "processed_segment_ids": ["segment-id"],
   "data": [
-    {"source_id": 0, "fact": "A complete standalone fact."}
+    {"segment_id": "segment-id", "source_ids": [0], "fact": "A complete standalone fact."}
   ]
 }
 
 Examples:
 
 --- Topic 1 ---
-[2022-03-20T13:21:00.000, Sun] 0.User: My name is Alice and I work as a teacher.
-[2022-03-20T13:21:00.500, Sun] 1.User: My favourite movies are Inception and Interstellar.
---- Topic 2 ---
-[2022-03-20T13:21:01.000, Sun] 2.User: I visited Paris last summer.
-{"data": [
-  {"source_id": 0, "fact": "User's name is Alice."},
-  {"source_id": 0, "fact": "User works as a teacher."},
-  {"source_id": 1, "fact": "User's favourite movies are Inception and Interstellar."},
-  {"source_id": 2, "fact": "User visited Paris last summer."}
+[2024-01-07T17:24:00.000, Sun] 0.Tim: Hey John! Next month I'm off to Ireland for a semester in Galway
+[2024-01-07T17:24:01.000, Sun] 1.John: That's awesome! Where will you stay?
+[2024-01-07T17:24:02.000, Sun] 2.Tim: In Galway. I also want to visit The Cliffs of Moher
+[2024-01-07T17:24:03.000, Sun] 3.John: Nice! By the way, I held a benefit basketball game last week (image description: basketball court with players and audience)
+[2024-01-07T17:24:04.000, Sun] 4.Tim: Cool! I'm currently reading "The Name of the Wind" by Patrick Rothfuss
+
+{"processed_segment_ids": ["1"], "data": [
+  {"segment_id": "1", "source_ids": [0], "fact": "Tim is going to Ireland for a semester in Galway next month after 2024-01-07."},
+  {"segment_id": "1", "source_ids": [1, 2], "fact": "Tim will stay in Galway."},
+  {"segment_id": "1", "source_ids": [2], "fact": "Tim wants to visit The Cliffs of Moher."},
+  {"segment_id": "1", "source_ids": [3], "fact": "John held a benefit basketball game at a basketball court with players and audience the week before 2024-01-07."},
+  {"segment_id": "1", "source_ids": [4], "fact": "Tim is currently reading 'The Name of the Wind' by Patrick Rothfuss."}
 ]}
 
-Reminder: Be exhaustive. Unless a message is purely meaningless, extract and output it as a fact.
+Reminder: Be exhaustive for factual information. Do not output relation fields in this prompt.
 
 InfoBudget routing metadata:
 - router_level: {router_level}

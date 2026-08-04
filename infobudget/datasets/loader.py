@@ -45,15 +45,20 @@ class DatasetLoader:
             return []
         return sorted([item.name for item in dataset_dir.iterdir() if item.is_dir()])
 
-    def load(self, dataset_name: str, split: str) -> list[DatasetDialogueExample]:
+    def load(
+        self,
+        dataset_name: str,
+        split: str,
+        sample_ids: set[str] | None = None,
+    ) -> list[DatasetDialogueExample]:
         """按数据集与 split 加载样本。"""
         manifest = self.load_manifest(dataset_name, split)
-        return self.load_samples_from_path(Path(manifest["files"]["samples"]))
+        return self.load_samples_from_path(Path(manifest["files"]["samples"]), sample_ids)
 
-    def iter_samples(self, dataset_name: str, split: str):
+    def iter_samples(self, dataset_name: str, split: str, sample_ids: set[str] | None = None):
         """按数据集与 split 流式加载样本。"""
         manifest = self.load_manifest(dataset_name, split)
-        yield from self.iter_samples_from_path(Path(manifest["files"]["samples"]))
+        yield from self.iter_samples_from_path(Path(manifest["files"]["samples"]), sample_ids)
 
     def load_questions(self, dataset_name: str, split: str) -> list[dict]:
         """加载扁平问题索引。"""
@@ -66,12 +71,15 @@ class DatasetLoader:
         return self._read_jsonl(Path(manifest["files"]["sessions"]))
 
     @staticmethod
-    def load_samples_from_path(path: Path) -> list[DatasetDialogueExample]:
+    def load_samples_from_path(
+        path: Path,
+        sample_ids: set[str] | None = None,
+    ) -> list[DatasetDialogueExample]:
         """按路径加载 sample 文件。"""
-        return list(DatasetLoader.iter_samples_from_path(path))
+        return list(DatasetLoader.iter_samples_from_path(path, sample_ids))
 
     @staticmethod
-    def iter_samples_from_path(path: Path):
+    def iter_samples_from_path(path: Path, sample_ids: set[str] | None = None):
         """按路径流式加载 sample 文件。"""
         if not path.exists():
             raise FileNotFoundError(f"Processed sample file not found: {path}")
@@ -80,6 +88,8 @@ class DatasetLoader:
                 if not line.strip():
                     continue
                 raw = json.loads(line)
+                if sample_ids is not None and raw["sample_id"] not in sample_ids:
+                    continue
                 yield DatasetDialogueExample(
                     sample_id=raw["sample_id"],
                     dataset_name=raw["dataset_name"],

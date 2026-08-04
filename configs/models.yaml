@@ -1,59 +1,70 @@
 models:
-  # Previous local small model configuration:
-  # small:
-  #   deploy: "local"
-  #   backend: "vllm"
-  #   model_name: "Qwen/Qwen2.5-7B-Instruct"
-  #   tokenizer_name: "Qwen/Qwen2.5-7B-Instruct"
-  #   api_base_url: "http://localhost:8001/v1"
-  #   api_key: "EMPTY"
-  #   max_context_tokens: 32768
-  #   tensor_parallel_size: 1
-  #   dtype: "float16"
   small:
     deploy: "api"
     backend: "openai_compatible"
     model_name: "Qwen/Qwen2.5-7B-Instruct"
-    tokenizer_name: "Qwen/Qwen2.5-7B-Instruct"
-    api_base_url: "https://api.siliconflow.cn/v1"
-    api_key: "sk-fvvljjkeduuvchifpwosqjkgqlrbrkizuzyceutjekwraedw"
-    api_key_env: "SMALL_MODEL_API_KEY"
     request_model_name: "Qwen/Qwen2.5-7B-Instruct"
+    tokenizer_name: "Qwen/Qwen2.5-7B-Instruct"
+    tokenizer_local_path: "./models/tokenizers/small"
+    api_base_url: "https://api.siliconflow.cn/v1"
+    api_key_env: "SILICONFLOW_API_KEY"
     max_context_tokens: 32768
+    max_output_tokens: 8192
     tensor_parallel_size: 1
     dtype: "n/a"
-  # Previous local medium model configuration:
-  # medium:
-  #   deploy: "local"
-  #   backend: "vllm"
-  #   model_name: "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
-  #   tokenizer_name: "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
-  #   api_base_url: "http://localhost:8002/v1"
-  #   api_key: "EMPTY"
-  #   max_context_tokens: 32768
-  #   tensor_parallel_size: 2
-  #   dtype: "fp8"
+
   medium:
     deploy: "api"
     backend: "openai_compatible"
     model_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
-    tokenizer_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
-    api_base_url: "https://api.siliconflow.cn/v1"
-    api_key: "sk-rzklcjhshmqiyimdauzdvaeosikfybxesmlwsoxoxwcershb"
-    api_key_env: "MEDIUM_MODEL_API_KEY"
     request_model_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
-    max_context_tokens: 32768
+    tokenizer_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    tokenizer_local_path: "./models/tokenizers/medium"
+    api_base_url: "https://api.siliconflow.cn/v1"
+    api_key_env: "MEDIUM_MODEL_API_KEY"
+    max_context_tokens: 262144
+    max_output_tokens: 16384
     tensor_parallel_size: 1
     dtype: "n/a"
+
   large:
     deploy: "api"
     backend: "openai_compatible"
     model_name: "qwen/qwen3-next-80b-a3b-instruct"
-    tokenizer_name: "qwen/qwen3-next-80b-a3b-instruct"
-    api_base_url: "https://api.novita.ai/openai"
-    api_key: "sk_UGrG5j2iYX4Gkanuz7HdmsB-rFcKiOjvoOV7g58eAJs"
-    api_key_env: "DASHSCOPE_API_KEY"
     request_model_name: "qwen/qwen3-next-80b-a3b-instruct"
-    max_context_tokens: 262144
+    tokenizer_name: "qwen/qwen3-next-80b-a3b-instruct"
+    tokenizer_local_path: "./models/tokenizers/large"
+    api_base_url: "https://api.novita.ai/openai"
+    api_key_env: "LARGE_MODEL_API_KEY"
+    max_context_tokens: 131072
+    max_output_tokens: 32000
+    tensor_parallel_size: 1
+    dtype: "n/a"
+
+  qa_reader:
+    deploy: "api"
+    backend: "openai_compatible"
+    model_name: "gpt-4o-mini"
+    request_model_name: "gpt-4o-mini"
+    tokenizer_name: "gpt-4o-mini"
+    tokenizer_local_path: "./models/tokenizers/qa_reader"
+    api_base_url: "https://api.openai.com/v1"
+    api_key_env: "QA_READER_API_KEY"
+    max_context_tokens: 128000
+    max_output_tokens: 16384
+    tensor_parallel_size: 1
+    dtype: "n/a"
+
+  judge_llm:
+    deploy: "api"
+    backend: "openai_compatible"
+    model_name: "gpt-4o-mini"
+    request_model_name: "gpt-4o-mini"
+    tokenizer_name: "gpt-4o-mini"
+    tokenizer_local_path: "./models/tokenizers/judge_llm"
+    api_base_url: "https://api.openai.com/v1"
+    api_key_env: "JUDGE_MODEL_API_KEY"
+    max_context_tokens: 128000
+    max_output_tokens: 16384
     tensor_parallel_size: 1
     dtype: "n/a"

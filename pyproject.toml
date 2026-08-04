@@ -2,13 +2,16 @@
 name = "infobudget"
 version = "0.1.0"
 description = "Budget-aware long-term memory extraction pipeline for LLM agents."
-readme = "CHANGELOG.md"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "numpy>=1.26",
   "PyYAML>=6.0",
   "qdrant-client>=1.12",
+  "huggingface-hub>=0.36",
   "sentence-transformers>=3.0",
+  "torch>=2.0",
+  "transformers>=4.40",
 ]
 
 [dependency-groups]

@@ -5,14 +5,23 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
+.ipynb_checkpoints/
 .coverage
 coverage.xml
 htmlcov/
+*.prof
+
+# Python packaging artifacts
+build/
+dist/
+*.egg-info/
 
 # Virtual environments and local runtime state
 .venv/
 venv/
 env/
+.uv-cache/
 .env
 .env.*
 !.env.example
@@ -20,25 +29,44 @@ env/
 # IDE and OS metadata
 .vscode/
 .idea/
+.vs/
 .DS_Store
 Thumbs.db
 desktop.ini
+*.swp
+*.swo
+*~
 
 # Project experiment outputs
 outputs/
 results/
+qdrant_storage/
+.qdrant/
 
 # Local model weights and downloaded artifacts
-models/
+models/**
+!models/
+!models/**/
+!models/README.md
+!models/**/.gitkeep
+seg_models/**
+!seg_models/
+!seg_models/**/
+!seg_models/README.md
+!seg_models/.gitignore
+!seg_models/**/.gitkeep
 
 # Local dataset material.
-# Keep directory placeholders if they are used, but ignore raw and processed data files.
+# Keep directory placeholders if they are used, but ignore raw, processed, and segmented data files.
 datasets/raw/**
 !datasets/raw/**/
 !datasets/raw/**/.gitkeep
 datasets/processed/**
 !datasets/processed/**/
 !datasets/processed/**/.gitkeep
+datasets/segmented/**
+!datasets/segmented/**/
+!datasets/segmented/**/.gitkeep
 
 # Local external reference checkouts
 .external_refs/
@@ -52,3 +80,4 @@ configs/secrets*.yaml
 *.log
 *.tmp
 *.temp
+deploy/qdrant/storage/

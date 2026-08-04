@@ -27,7 +27,7 @@ def main() -> None:
     args = parse_args()
     bundle = load_project_bundle("configs")
     manager = DatasetPreprocessManager(bundle.config.dataset, bundle.root_dir)
-    summary = manager.preprocess_all(datasets=args.datasets or bundle.config.evaluation.datasets)
+    summary = manager.preprocess_all(datasets=args.datasets or bundle.config.dataset.supported_datasets)
     for dataset_name, splits in summary.items():
         print(f"{dataset_name}: {splits}")
 

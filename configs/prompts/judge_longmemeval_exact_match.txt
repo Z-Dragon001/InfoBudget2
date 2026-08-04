@@ -1,0 +1,6 @@
+Here is a question, a list of golden answers, an AI-generated answer.
+Can you judge whether the AI-generated answer is correct according to the question and golden answers?
+Question: $question
+Golden Answers: $golden_answers
+AI-generated answer: $prediction
+Simply answer Yes or No.

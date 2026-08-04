@@ -1,0 +1,11 @@
+embeddings:
+  router: &bge_m3
+    model_name: "BAAI/bge-m3"
+    revision: "5617a9f61b028005a4858fdac845db406aefb181"
+    local_path: "./models/embeddings/bge-m3"
+    dimension: 1024
+    max_length: 8192
+    normalize: true
+    local_files_only: true
+  memory:
+    <<: *bge_m3
