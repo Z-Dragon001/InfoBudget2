@@ -47,7 +47,7 @@ storage:
   url: "http://127.0.0.1:6333"
   grpc_port: 6334
   prefer_grpc: false
-  timeout_seconds: 30
+  timeout_seconds: 300
   api_key_env: ""
   collection_namespace: "{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v2"
   vector_size: 1024
