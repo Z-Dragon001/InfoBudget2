@@ -14,6 +14,24 @@ uv sync --frozen --group dev --python 3.12
 uv run pytest
 ```
 
+Create the local credential file once. It is ignored by Git and loaded automatically by
+all project configuration entry points; variables already exported by the operating system
+take precedence:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+On Linux:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+Fill only the API keys required by the selected command. Keep the `api_key_env` values in
+`configs/models.yaml` unchanged because they are environment-variable names, not secrets.
+
 Models and datasets are deliberately never downloaded by training or evaluation. Place
 them under the paths documented in `docs/hardware_and_environment_setup.md`. Configure API
 keys only through the environment variables named in `configs/models.yaml`.

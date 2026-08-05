@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import yaml
 
-from infobudget.config import load_project_bundle
+from infobudget.config import load_env_file, load_project_bundle
 from infobudget.rl_router.config import load_rl_bundle, scan_config_secrets
 from infobudget.schemas import ModelSpec
 
@@ -90,3 +91,22 @@ def test_model_spec_resolves_only_environment_key(monkeypatch) -> None:
     )
     monkeypatch.setenv("EXAMPLE_MODEL_API_KEY", "test-key")
     assert spec.resolved_api_key() == "test-key"
+
+
+def test_project_env_file_loads_without_overriding_process_environment(
+    tmp_path, monkeypatch
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "# local credentials\n"
+        "INFOBUDGET_ENV_TEST='from-file'\n"
+        "export INFOBUDGET_EXISTING_TEST=from-file\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFOBUDGET_ENV_TEST", raising=False)
+    monkeypatch.setenv("INFOBUDGET_EXISTING_TEST", "from-process")
+
+    assert load_env_file(env_path) is True
+    assert load_env_file(tmp_path / "missing.env") is False
+    assert os.environ["INFOBUDGET_ENV_TEST"] == "from-file"
+    assert os.environ["INFOBUDGET_EXISTING_TEST"] == "from-process"

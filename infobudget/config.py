@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,6 +11,9 @@ from typing import Any
 import yaml
 
 from infobudget.schemas import ModelSpec, PriceSpec
+
+
+ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(slots=True)
@@ -69,6 +74,8 @@ class ProjectBundle:
 
 def load_project_bundle(config_dir: str | Path = "configs") -> ProjectBundle:
     config_path = Path(config_dir)
+    root_dir = config_path.parent.resolve()
+    load_env_file(root_dir / ".env")
     raw = _read_yaml(config_path / "config.yaml")
     app = AppConfig(
         project=ProjectConfig(**raw["project"]),
@@ -84,12 +91,37 @@ def load_project_bundle(config_dir: str | Path = "configs") -> ProjectBundle:
         for name, item in _read_yaml(config_path / "prices.yaml")["prices"].items()
     }
     return ProjectBundle(
-        root_dir=config_path.parent.resolve(),
+        root_dir=root_dir,
         config=app,
         models=models,
         prices=prices,
         prompt_dir=config_path / "prompts",
     )
+
+
+def load_env_file(path: str | Path) -> bool:
+    """Load a small project-local .env file without overriding process variables."""
+
+    source = Path(path)
+    if not source.is_file():
+        return False
+    for line_number, original in enumerate(
+        source.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = original.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        name, separator, value = line.partition("=")
+        name = name.strip()
+        if not separator or not ENV_NAME_PATTERN.fullmatch(name):
+            raise ValueError(f"invalid .env entry at {source}:{line_number}")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(name, value)
+    return True
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:

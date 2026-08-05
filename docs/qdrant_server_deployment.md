@@ -57,8 +57,8 @@ export its value before starting any project command.
 One server holds separate L/M/H/S collections for each dataset namespace:
 
 ```text
-longmemeval_<split>_<segmentation-version>_fact_v2_L/M/H/S
-locomo_<split>_<segmentation-version>_fact_v2_L/M/H/S
+longmemeval_<split>_<segmentation-version>_<embedding-hash-prefix>_fact_v2_L/M/H/S
+locomo_<split>_<segmentation-version>_<embedding-hash-prefix>_fact_v2_L/M/H/S
 ```
 
 Every Qdrant query still requires dataset, split, and sample filters. Local inspection files
