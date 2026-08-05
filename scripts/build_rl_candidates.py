@@ -120,9 +120,13 @@ def main() -> None:
         namespace=namespace,
     )
     schema_probe.close()
-    shared_prompt = bundle.prompt_path("fact_extraction").read_text(encoding="utf-8")
+    prompt_role = bundle.fact_extraction_prompt_role(first.dataset_name)
+    prompt_version = bundle.fact_extraction_prompt_version(first.dataset_name)
+    shared_prompt = bundle.fact_extraction_prompt_path(first.dataset_name).read_text(
+        encoding="utf-8"
+    )
     prompts = {tier: shared_prompt for tier in models}
-    prompt_versions = {tier: "joint_memory_extraction_batch_json_v6" for tier in models}
+    prompt_versions = {tier: prompt_version for tier in models}
     prices = {tier: bundle.project.prices[models[tier].model_name] for tier in models}
     output_root = root / "outputs" / "rl_router"
     run_id = args.resume or args.extraction_run_id or str(uuid.uuid4())
@@ -156,6 +160,13 @@ def main() -> None:
             raise ValueError("resume Qdrant collection namespace differs from the original run")
         if manifest.get("embedding_model_hash") != embedding_hash:
             raise ValueError("resume embedding model hash differs from the original run")
+        if (
+            manifest.get("fact_extraction_prompt_role") != prompt_role
+            or manifest.get("fact_extraction_prompt_version") != prompt_version
+            or manifest.get("prompt_hashes", {}).get(prompt_role)
+            != file_sha256(bundle.fact_extraction_prompt_path(first.dataset_name))
+        ):
+            raise ValueError("resume fact-extraction prompt differs from the original run")
         if campaign and (
             manifest.get("campaign_id") != args.campaign_id
             or manifest.get("campaign_scope_hash") != campaign.get("campaign_scope_hash")
@@ -185,6 +196,8 @@ def main() -> None:
             completed_tiers=[],
             campaign_id=args.campaign_id or "",
             campaign_scope_hash=(campaign or {}).get("campaign_scope_hash", ""),
+            fact_extraction_prompt_role=prompt_role,
+            fact_extraction_prompt_version=prompt_version,
             segment_content_hashes={
                 segment.segment_id: segment.source_content_hash for segment in segments
             },

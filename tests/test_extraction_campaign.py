@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from infobudget.rl_router.campaign import campaign_manifest_path, refresh_campaign
+from infobudget.rl_router.campaign import initialize_campaign
 from infobudget.rl_router.ledger import atomic_write_json
 from infobudget.rl_router.manifest import resolve_collection_namespace
 
@@ -79,3 +83,81 @@ def test_campaign_requires_all_runs_and_aggregate_quality_to_pass(tmp_path) -> N
     failed = refresh_campaign(bundle, campaign_id)
     assert failed["status"] == "quality_failed"
     assert "empty_fact_segment_rate" in failed["quality_violations"]
+
+
+def test_campaign_pins_only_the_selected_dataset_prompt(tmp_path) -> None:
+    prompt_root = tmp_path / "prompts"
+    prompt_root.mkdir()
+    locomo_prompt = prompt_root / "locomo.txt"
+    longmemeval_prompt = prompt_root / "longmemeval.txt"
+    locomo_prompt.write_text("locomo prompt v1", encoding="utf-8")
+    longmemeval_prompt.write_text("longmemeval prompt v1", encoding="utf-8")
+    segments = (
+        tmp_path
+        / "datasets"
+        / "segmented"
+        / "locomo"
+        / "full"
+        / "nsp_text_tiling"
+        / "samples"
+        / "sample-1"
+        / "segments.jsonl"
+    )
+    segments.parent.mkdir(parents=True)
+    segments.write_text('{"segment_id":"s1"}\n', encoding="utf-8")
+    embedding_root = tmp_path / "embedding"
+    embedding_root.mkdir()
+    (embedding_root / "config.json").write_text("{}", encoding="utf-8")
+    roles = {
+        tier: SimpleNamespace(effective_model_name=f"model-{tier}")
+        for tier in ("small", "medium", "large")
+    }
+    paths = {"locomo": locomo_prompt, "longmemeval": longmemeval_prompt}
+    versions = {"locomo": "locomo-v1", "longmemeval": "longmemeval-v1"}
+    bundle = SimpleNamespace(
+        project=SimpleNamespace(root_dir=tmp_path, models=roles),
+        embeddings={"memory": {"local_path": "embedding"}},
+        rl={
+            "extraction": {"quality_gates": {}},
+            "storage": {"collection_namespace": "test-{dataset}"},
+        },
+        fact_extraction_prompt_role=lambda dataset: f"fact_extraction_{dataset}",
+        fact_extraction_prompt_version=lambda dataset: versions[dataset],
+        fact_extraction_prompt_path=lambda dataset: paths[dataset],
+    )
+
+    created = initialize_campaign(
+        bundle,
+        campaign_id="locomo-v1",
+        dataset_name="locomo",
+        split="full",
+        segmentation_method="nsp_text_tiling",
+        run_prefix="locomo-v1",
+    )
+    assert created["fact_extraction_prompt_role"] == "fact_extraction_locomo"
+    assert created["fact_extraction_prompt_version"] == "locomo-v1"
+    assert created["prompt_sha256"] == hashlib.sha256(
+        locomo_prompt.read_bytes()
+    ).hexdigest()
+
+    longmemeval_prompt.write_text("longmemeval prompt v2", encoding="utf-8")
+    unchanged = initialize_campaign(
+        bundle,
+        campaign_id="locomo-v1",
+        dataset_name="locomo",
+        split="full",
+        segmentation_method="nsp_text_tiling",
+        run_prefix="locomo-v1",
+    )
+    assert unchanged["campaign_scope_hash"] == created["campaign_scope_hash"]
+
+    locomo_prompt.write_text("locomo prompt v2", encoding="utf-8")
+    with pytest.raises(ValueError, match="different immutable scope"):
+        initialize_campaign(
+            bundle,
+            campaign_id="locomo-v1",
+            dataset_name="locomo",
+            split="full",
+            segmentation_method="nsp_text_tiling",
+            run_prefix="locomo-v1",
+        )

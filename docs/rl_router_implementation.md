@@ -13,6 +13,10 @@
 | Routing | leakage-safe structural features, frozen embedding + MLP policy/value heads, baselines, and constrained actor-critic |
 | QA evaluation | external reader/judge prompts and S-only `AssemblyEvaluator` |
 
+Fact extraction uses separate audited prompt contracts for LoCoMo and LongMemEval. Each
+campaign pins the selected dataset prompt role, semantic version, and SHA-256 so changes to
+one dataset prompt do not invalidate campaigns for the other dataset.
+
 The repository contains only the fact-only RL pipeline. Relation, preference, constraint,
 episode, consolidation, fixed-percentile routing, and legacy memory paths have been removed.
 

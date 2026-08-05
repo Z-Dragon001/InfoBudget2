@@ -45,14 +45,28 @@ def test_five_api_roles_have_prices_and_environment_keys() -> None:
         "127.0.0.1:${QDRANT_HTTP_PORT:-6333}:6333",
         "127.0.0.1:${QDRANT_GRPC_PORT:-6334}:6334",
     ]
-    prompt = rl_bundle.prompt_path("fact_extraction").read_text(encoding="utf-8")
-    assert "Maximum output: 15 facts per topic segment." in prompt
-    assert '"processed_segment_ids"' in prompt
-    assert '"segment_id"' in prompt
-    assert '"source_ids"' in prompt
-    assert '"fact"' in prompt
+    extraction_prompts = {
+        dataset: rl_bundle.fact_extraction_prompt_path(dataset).read_text(
+            encoding="utf-8"
+        )
+        for dataset in ("locomo", "longmemeval")
+    }
+    for dataset, prompt in extraction_prompts.items():
+        assert "Maximum output: 15 facts per topic segment." in prompt
+        assert '"processed_segment_ids"' in prompt
+        assert '"segment_id"' in prompt
+        assert '"source_ids"' in prompt
+        assert '"fact"' in prompt
+        assert "external knowledge" in prompt
+    assert rl_bundle.fact_extraction_prompt_version("locomo").endswith("_v8")
+    assert rl_bundle.fact_extraction_prompt_version("longmemeval").endswith("_v7")
+    assert "Personal Information and Fact Extractor" in extraction_prompts["locomo"]
+    assert "temporary states" in extraction_prompts["locomo"]
+    assert "Knowledge updates" in extraction_prompts["longmemeval"]
+    assert "Abstention support" in extraction_prompts["longmemeval"]
     assert set(rl_bundle.rl["prompts"]) == {
-        "fact_extraction",
+        "fact_extraction_locomo",
+        "fact_extraction_longmemeval",
         "locomo_answer",
         "longmemeval_answer",
         "locomo_judge",

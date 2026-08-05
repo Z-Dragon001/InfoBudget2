@@ -41,6 +41,8 @@ def initialize_campaign(
         raise FileNotFoundError(f"campaign has no segmented samples under {samples_root}")
     sample_files = {path.parent.name: path.resolve() for path in segment_files}
     embedding_hash = memory_embedding_hash(bundle)
+    prompt_role = bundle.fact_extraction_prompt_role(dataset_name)
+    prompt_version = bundle.fact_extraction_prompt_version(dataset_name)
     scope = {
         "dataset_name": dataset_name,
         "split": split,
@@ -57,8 +59,10 @@ def initialize_campaign(
         "models": {
             tier: bundle.project.models[tier].effective_model_name for tier in TIERS
         },
+        "fact_extraction_prompt_role": prompt_role,
+        "fact_extraction_prompt_version": prompt_version,
         "prompt_sha256": hashlib.sha256(
-            bundle.prompt_path("fact_extraction").read_bytes()
+            bundle.fact_extraction_prompt_path(dataset_name).read_bytes()
         ).hexdigest(),
         "extraction_config": bundle.rl["extraction"],
         "collection_namespace_template": bundle.rl["storage"]["collection_namespace"],
@@ -205,6 +209,8 @@ def validate_campaign_environment(
     *,
     precomputed_embedding_hash: str | None = None,
 ) -> None:
+    dataset_name = str(manifest.get("dataset_name") or "")
+    prompt_role = bundle.fact_extraction_prompt_role(dataset_name)
     actual = {
         "embedding_model_hash": (
             precomputed_embedding_hash or memory_embedding_hash(bundle)
@@ -212,8 +218,12 @@ def validate_campaign_environment(
         "models": {
             tier: bundle.project.models[tier].effective_model_name for tier in TIERS
         },
+        "fact_extraction_prompt_role": prompt_role,
+        "fact_extraction_prompt_version": bundle.fact_extraction_prompt_version(
+            dataset_name
+        ),
         "prompt_sha256": hashlib.sha256(
-            bundle.prompt_path("fact_extraction").read_bytes()
+            bundle.fact_extraction_prompt_path(dataset_name).read_bytes()
         ).hexdigest(),
         "extraction_config": bundle.rl["extraction"],
         "collection_namespace_template": bundle.rl["storage"]["collection_namespace"],

@@ -273,7 +273,7 @@ def main() -> None:
         tier: bundle.project.prices[bundle.project.models[tier].model_name]
         for tier in ("small", "medium", "large")
     }
-    prompt = bundle.prompt_path("fact_extraction").read_text(encoding="utf-8")
+    prompt = bundle.fact_extraction_prompt_path(args.dataset).read_text(encoding="utf-8")
     tokenizers = {
         tier: LocalTokenizer(bundle.project.root_dir / bundle.project.models[tier].tokenizer_local_path)
         for tier in ("small", "medium", "large")

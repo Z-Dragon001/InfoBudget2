@@ -2,7 +2,8 @@ schema_version: "rl_router_v1"
 seed: 42
 
 prompts:
-  fact_extraction: "joint_memory_extraction.txt"
+  fact_extraction_locomo: "locomo_memory_extraction.txt"
+  fact_extraction_longmemeval: "longmemeval_memory_extraction.txt"
   locomo_answer: "locomo_answer.txt"
   longmemeval_answer: "longmemeval_answer.txt"
   locomo_judge: "judge_locomo.txt"
@@ -12,6 +13,10 @@ prompts:
   longmemeval_preference_judge: "judge_longmemeval_preference.txt"
   longmemeval_abstention_judge: "judge_longmemeval_abstention.txt"
   longmemeval_exact_match_judge: "judge_longmemeval_exact_match.txt"
+
+prompt_versions:
+  fact_extraction_locomo: "locomo_memory_extraction_batch_json_v8"
+  fact_extraction_longmemeval: "longmemeval_memory_extraction_batch_json_v7"
 
 extraction:
   max_facts_per_segment: 15

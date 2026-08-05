@@ -104,6 +104,13 @@ and still uses one model call. Only the temporary `visible_source_ids` parser al
 derived from the truncated text. The run manifest, segment-cost ledger, and fact payload
 record visible and dropped source IDs for audit. Cost uses only that call's provider usage.
 
+LoCoMo and LongMemEval use separate, dataset-specific fact-extraction prompts. LoCoMo
+prioritizes directly supported personal background, relationships, experiences, plans,
+preferences, and image-grounded context. LongMemEval prioritizes cross-session entities,
+temporal evidence, knowledge updates, preferences, and evidence-preserving abstention. A
+campaign freezes only the prompt role, version, and SHA-256 selected for its own dataset;
+changing that prompt requires a new campaign and new extraction runs for that dataset.
+
 `--resume` skips committed batches and retries only recoverable work. Terminal schema
 failures remain skipped unless `--retry-terminal` is explicit. State, raw request/response
 archives, attempt-level cost ledgers, run-scoped exports, and `manifest.json` are stored

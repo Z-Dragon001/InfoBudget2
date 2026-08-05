@@ -44,6 +44,10 @@
 
 ## 3. 训练数据记忆提取
 
+LoCoMo 与 LongMemEval 使用两份独立的详细事实提取提示词。前者覆盖个人背景、明确关系、
+经历、计划、偏好和图片语境；后者覆盖跨会话实体、时间推理、知识更新、偏好与不可回答
+场景。Campaign 只冻结当前数据集选中的提示词 role、版本与 SHA256。
+
 ### 3.1 LongMemEval 全数据调度器
 
 新增 `scripts/build_longmemeval_rl_candidates.ps1`，实现：
@@ -398,4 +402,3 @@ Update 功能尚未实现，只完成 `docs/memory_update_design.md` 设计文�
 | 训练入口 | `scripts/train_rl_router.py` |
 | Update 设计 | `docs/memory_update_design.md` |
 | Qdrant 部署 | `deploy/qdrant/docker-compose.yml` |
-

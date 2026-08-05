@@ -153,7 +153,8 @@ InfoBudget/
 │   ├── embeddings.yaml
 │   ├── rl_router.yaml
 │   └── prompts/
-│       └── joint_memory_extraction.txt
+│       ├── locomo_memory_extraction.txt
+│       └── longmemeval_memory_extraction.txt
 │       ├── locomo_answer.txt
 │       ├── longmemeval_answer.txt
 │       ├── judge_locomo.txt
@@ -624,7 +625,9 @@ buffer 不应只有“segment 数量”一个限制，还必须同时设置 toke
 
 ```yaml
 extraction:
-  prompt_file: "joint_memory_extraction.txt"
+  prompt_files:
+    locomo: "locomo_memory_extraction.txt"
+    longmemeval: "longmemeval_memory_extraction.txt"
   max_facts_per_segment: 15
   reserve_output_tokens_per_segment: 1024
   require_provider_usage: true
@@ -1661,7 +1664,8 @@ models:
   judge: "judge_llm"
 
 prompts:
-  fact_extraction: "joint_memory_extraction.txt"
+  fact_extraction_locomo: "locomo_memory_extraction.txt"
+  fact_extraction_longmemeval: "longmemeval_memory_extraction.txt"
   locomo_answer: "locomo_answer.txt"
   longmemeval_answer: "longmemeval_answer.txt"
   locomo_judge: "judge_locomo.txt"

@@ -14,6 +14,10 @@ from infobudget.config import ProjectBundle, load_project_bundle
 from infobudget.rl_router.buffers import tier_config_int
 
 REQUIRED_ROLES = {"small", "medium", "large", "qa_reader", "judge_llm"}
+FACT_EXTRACTION_PROMPT_ROLES = {
+    "locomo": "fact_extraction_locomo",
+    "longmemeval": "fact_extraction_longmemeval",
+}
 SECRET_PATTERN = re.compile(r"(?:sk[-_][A-Za-z0-9_-]{12,}|api[_-]?key\s*:\s*['\"]?(?!\$|$).+)", re.I)
 
 
@@ -30,6 +34,25 @@ class RLConfigBundle:
         if not path.is_file():
             raise FileNotFoundError(f"required prompt is missing: {path}")
         return path
+
+    def fact_extraction_prompt_role(self, dataset_name: str) -> str:
+        normalized = str(dataset_name).strip().lower()
+        try:
+            return FACT_EXTRACTION_PROMPT_ROLES[normalized]
+        except KeyError as exc:
+            raise ValueError(
+                f"unsupported fact-extraction dataset: {dataset_name!r}"
+            ) from exc
+
+    def fact_extraction_prompt_path(self, dataset_name: str) -> Path:
+        return self.prompt_path(self.fact_extraction_prompt_role(dataset_name))
+
+    def fact_extraction_prompt_version(self, dataset_name: str) -> str:
+        role = self.fact_extraction_prompt_role(dataset_name)
+        version = str((self.rl.get("prompt_versions") or {}).get(role) or "").strip()
+        if not version:
+            raise ValueError(f"prompt_versions.{role} must be a non-empty string")
+        return version
 
 
 def load_rl_bundle(config_dir: str | Path = "configs") -> RLConfigBundle:
@@ -149,6 +172,9 @@ def load_rl_bundle(config_dir: str | Path = "configs") -> RLConfigBundle:
     bundle = RLConfigBundle(project, embeddings, rl, directory)
     for prompt_role in rl.get("prompts", {}):
         bundle.prompt_path(prompt_role)
+    for dataset_name in FACT_EXTRACTION_PROMPT_ROLES:
+        bundle.fact_extraction_prompt_path(dataset_name)
+        bundle.fact_extraction_prompt_version(dataset_name)
     return bundle
 
 
