@@ -1,0 +1,13 @@
+Audit a candidate-independent frozen reference set for omissions. Use ONLY the topic segment and already accepted reference Facts below. Do not rewrite or repeat accepted facts. Add only materially missing, atomic facts supported by exact SOURCE_TURN_ID markers (not any old dialogue index printed inside a line). Do not use candidate model outputs, questions, gold answers, QA outcomes, or outside knowledge.
+
+Return JSON only:
+{"segment_id":"...","missing_facts":[{"fact_text":"...","source_turn_ids":[1],"fact_type":"identity|state|event|preference|goal|relationship|knowledge|assistant_answer|other","state_status":"current|historical|timeless|unspecified"}]}
+
+DATASET: {dataset_name}
+SEGMENT_ID: {segment_id}
+VALID_SOURCE_TURN_IDS: {turn_ids}
+TOPIC_SEGMENT:
+{segment_text}
+
+ALREADY_ACCEPTED_FACTS:
+{accepted_facts}

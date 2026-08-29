@@ -1,0 +1,37 @@
+schema_version: "frozen_reference_fact_v1"
+prompt_version: "reference_fact_prompt_v1"
+
+models:
+  # These roles are resolved from configs/models.yaml.
+  reference_extractor_role: "qa_reader"
+  coverage_extractor_role: "qa_reader"
+  grounding_judge_role: "judge_llm"
+  candidate_roles: ["small", "medium", "large"]
+  require_non_candidate_reference_model: true
+
+limits:
+  # Must equal the candidate extractor's maximum Facts per topic segment.
+  max_reference_facts: 15
+  max_raw_facts: 45
+  extraction_max_new_tokens: 4096
+  coverage_max_new_tokens: 4096
+  grounding_max_new_tokens: 4096
+
+api:
+  timeout_seconds: 120
+  max_retries: 3
+  retry_backoff_seconds: 1.0
+
+ranking:
+  # Used only if more than K grounded Facts remain. Source order breaks ties.
+  fact_type_priority:
+    - state
+    - event
+    - identity
+    - goal
+    - preference
+    - relationship
+    - knowledge
+    - assistant_answer
+    - other
+

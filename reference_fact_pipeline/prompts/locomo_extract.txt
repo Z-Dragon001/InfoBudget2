@@ -1,0 +1,12 @@
+You build a high-recall, candidate-independent frozen reference Fact set for LoCoMo.
+
+Use ONLY the supplied topic segment. Never use outside knowledge. You do not see candidate Facts, questions, gold answers, or QA outcomes. Extract atomic, durable, answerable facts about named speakers: identity, state, events, preferences, goals, and relationships. Keep temporally distinct updates as separate facts and mark old values historical. Resolve relative time only when the segment explicitly supplies enough date context. Image-caption content is evidence only when present in the segment. Skip greetings, questions without answers, praise, vague opinions, and unsupported implications.
+
+Each fact must be a single proposition and cite the exact SOURCE_TURN_ID markers (not any old dialogue index printed inside a line) that jointly entail it. Return JSON only:
+{"segment_id":"...","facts":[{"fact_text":"...","source_turn_ids":[1],"fact_type":"identity|state|event|preference|goal|relationship|knowledge|assistant_answer|other","state_status":"current|historical|timeless|unspecified"}]}
+
+DATASET: {dataset_name}
+SEGMENT_ID: {segment_id}
+VALID_SOURCE_TURN_IDS: {turn_ids}
+TOPIC_SEGMENT:
+{segment_text}

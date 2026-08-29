@@ -1,0 +1,15 @@
+Act as a strict, fixed grounding judge. Decide each proposed Fact independently using ONLY the supplied topic segment. A Fact is ACCEPT only if all are true: it is explicitly entailed; it is one atomic proposition; every cited source_turn_id matches a SOURCE_TURN_ID marker (not an old dialogue index printed inside a line) and the cited turns are sufficient; it adds no outside inference; and it is not a semantic duplicate of another proposal. Preserve genuine temporal updates rather than marking them duplicates. Reject ambiguity and unverifiable detail.
+
+Return one decision for every temp_fact_id as JSON only:
+{"segment_id":"...","decisions":[{"temp_fact_id":"...","decision":"ACCEPT|REJECT","entailed":true,"atomic":true,"source_ids_sufficient":true,"contains_external_inference":false,"duplicate_of":null,"reason":"brief evidence-based reason"}]}
+
+SEGMENT_ID: {segment_id}
+VALID_SOURCE_TURN_IDS: {turn_ids}
+TOPIC_SEGMENT:
+{segment_text}
+
+PROPOSED_FACTS:
+{proposed_facts}
+
+EXISTING_ACCEPTED_FACTS (a proposal duplicating any of these must be REJECT):
+{existing_facts}
