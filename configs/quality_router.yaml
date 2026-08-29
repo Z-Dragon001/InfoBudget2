@@ -1,0 +1,30 @@
+schema_version: "quality_router_v1"
+
+quality_router:
+  label_name: "silver_strict_fact_f1"
+  capability_dimensions:
+    - "memory_recall"
+    - "target_memory_precision"
+    - "memory_accuracy"
+    - "current_state_accuracy"
+    - "target_binding_accuracy"
+    - "stale_value_rejection"
+    - "evidence_f1"
+  hidden_dimensions: [512, 128]
+  dropout: 0.1
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  batch_size: 128
+  epochs: 100
+  early_stopping_patience: 10
+  huber_delta: 0.1
+  budget_cost_quantum: 0.000001
+  seed: 42
+
+artifacts:
+  reference_facts: "reference_facts.jsonl"
+  fact_quality_labels: "fact_quality_labels.jsonl"
+  qa_retrieval_trace: "qa_retrieval_trace.jsonl"
+  segment_question_usage: "segment_question_usage.jsonl"
+  counterfactual_segment_effects: "counterfactual_segment_effects.jsonl"
+  routing_decisions: "routing_decisions.jsonl"

@@ -69,6 +69,25 @@ def load_rl_bundle(config_dir: str | Path = "configs") -> RLConfigBundle:
             raise ValueError(f"prices.yaml has no price snapshot for {spec.model_name}")
     embeddings = _read_yaml(directory / "embeddings.yaml").get("embeddings", {})
     rl = _read_yaml(directory / "rl_router.yaml")
+    model_family = str(rl.get("model_family") or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", model_family):
+        raise ValueError(
+            "model_family must be a non-empty lowercase namespace component"
+        )
+    rl["model_family"] = model_family
+    known_family_markers = {"qwen": "qwen", "llama": "llama"}
+    marker = known_family_markers.get(model_family)
+    if marker is not None:
+        mismatched_roles = [
+            role
+            for role in ("small", "medium", "large")
+            if marker not in project.models[role].effective_model_name.casefold()
+        ]
+        if mismatched_roles:
+            raise ValueError(
+                f"model_family={model_family} does not match extraction model roles: "
+                + ", ".join(mismatched_roles)
+            )
     extraction = rl["extraction"]
     if not isinstance(extraction.get("allow_oversize_singleton", False), bool):
         raise ValueError("extraction.allow_oversize_singleton must be a boolean")
@@ -122,6 +141,22 @@ def load_rl_bundle(config_dir: str | Path = "configs") -> RLConfigBundle:
     if float(reliability.get("retry_backoff_seconds", 1.0)) < 0:
         raise ValueError("api_reliability.retry_backoff_seconds cannot be negative")
     storage = rl.get("storage", {})
+    namespace_template = str(storage.get("collection_namespace") or "")
+    required_namespace_fields = {
+        "{model_family}",
+        "{dataset}",
+        "{split}",
+        "{segmentation_version}",
+        "{embedding_hash}",
+    }
+    missing_namespace_fields = sorted(
+        field for field in required_namespace_fields if field not in namespace_template
+    )
+    if missing_namespace_fields:
+        raise ValueError(
+            "storage.collection_namespace is missing required placeholders: "
+            + ", ".join(missing_namespace_fields)
+        )
     storage_mode = str(storage.get("mode", "")).strip().lower()
     if storage_mode not in {"local", "server"}:
         raise ValueError("storage.mode must be local or server")
@@ -148,6 +183,19 @@ def load_rl_bundle(config_dir: str | Path = "configs") -> RLConfigBundle:
             raise ValueError(f"embeddings.yaml is missing {role}")
         if not embeddings[role].get("local_files_only", False):
             raise ValueError(f"embedding role {role} must set local_files_only=true")
+        if int(embeddings[role].get("dimension", 0)) <= 0:
+            raise ValueError(f"embedding role {role} dimension must be positive")
+        if embeddings[role].get("long_text_strategy", "truncate") not in {
+            "truncate",
+            "mean_pool_chunks",
+        }:
+            raise ValueError(
+                f"embedding role {role} has invalid long_text_strategy"
+            )
+    if int(storage["vector_size"]) != int(embeddings["memory"]["dimension"]):
+        raise ValueError(
+            "storage.vector_size must equal embeddings.memory.dimension"
+        )
     evaluation = rl["evaluation"]
     for key, model_role in (("reader_max_new_tokens", "qa_reader"), ("judge_max_new_tokens", "judge_llm")):
         limit = int(evaluation[key])
@@ -155,6 +203,25 @@ def load_rl_bundle(config_dir: str | Path = "configs") -> RLConfigBundle:
             raise ValueError(f"evaluation.{key} exceeds the configured {model_role} output limit")
     if float(evaluation.get("judge_temperature", 0.0)) != 0.0:
         raise ValueError("LightMEM judge_temperature must remain 0.0")
+    exclusions = evaluation.get("excluded_categories_by_dataset", {})
+    if not isinstance(exclusions, dict):
+        raise ValueError(
+            "evaluation.excluded_categories_by_dataset must be a mapping"
+        )
+    unknown_datasets = sorted(set(exclusions) - {"locomo", "longmemeval"})
+    if unknown_datasets:
+        raise ValueError(
+            "evaluation.excluded_categories_by_dataset has unsupported datasets: "
+            + ", ".join(unknown_datasets)
+        )
+    for dataset_name, values in exclusions.items():
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value for value in values
+        ):
+            raise ValueError(
+                "evaluation.excluded_categories_by_dataset."
+                f"{dataset_name} must be a list of non-empty strings"
+            )
     router = rl["router"]
     if router.get("type") != "embedding_mlp":
         raise ValueError("training CLI currently requires router.type=embedding_mlp")
@@ -169,6 +236,14 @@ def load_rl_bundle(config_dir: str | Path = "configs") -> RLConfigBundle:
         raise ValueError("router.hidden_dimensions must be positive")
     if float(router["learning_rate"]) <= 0 or float(router["lambda_learning_rate"]) <= 0:
         raise ValueError("router learning rates must be positive")
+    if float(router.get("value_loss_coefficient", 0.5)) < 0:
+        raise ValueError("router.value_loss_coefficient cannot be negative")
+    if float(router.get("entropy_coefficient", 0.01)) < 0:
+        raise ValueError("router.entropy_coefficient cannot be negative")
+    if float(router.get("max_gradient_norm", 1.0)) <= 0:
+        raise ValueError("router.max_gradient_norm must be positive")
+    if float(router.get("gamma", 1.0)) != 1.0:
+        raise ValueError("the current contextual-bandit trainer requires router.gamma=1.0")
     bundle = RLConfigBundle(project, embeddings, rl, directory)
     for prompt_role in rl.get("prompts", {}):
         bundle.prompt_path(prompt_role)

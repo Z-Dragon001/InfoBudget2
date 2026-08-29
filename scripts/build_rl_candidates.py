@@ -35,6 +35,7 @@ from infobudget.rl_router.manifest import (
 )
 from infobudget.rl_router.qdrant_store import FactQdrantStore
 from infobudget.rl_router.schemas import BatchCompletion, ProviderUsage, TIERS
+from infobudget.utils.progress import StageProgress
 
 
 def main() -> None:
@@ -87,6 +88,8 @@ def main() -> None:
         local_path=root / embedding_cfg["local_path"],
         dimension=embedding_cfg["dimension"],
         normalize=embedding_cfg["normalize"],
+        max_length=embedding_cfg.get("max_length"),
+        long_text_strategy=embedding_cfg.get("long_text_strategy", "truncate"),
     )
     smoke_vectors = encoder.encode(["InfoBudget embedding preflight."])
     if smoke_vectors.shape != (1, encoder.dimension):
@@ -109,6 +112,7 @@ def main() -> None:
         )
     namespace = resolve_collection_namespace(
         storage_cfg,
+        model_family=bundle.rl["model_family"],
         dataset=first.dataset_name,
         split=first.split,
         segmentation_version=first.segmentation_version,
@@ -237,6 +241,25 @@ def main() -> None:
         max_retries=int(reliability.get("max_retries", 3)),
         retry_backoff_seconds=float(reliability.get("retry_backoff_seconds", 1.0)),
     )
+    progress = StageProgress(
+        f"training-memory extraction {first.sample_id}",
+        sum(int(item["batch_count"]) for item in selected_plan.values()),
+        unit="batches",
+    )
+
+    def report_batch(event: dict) -> None:
+        progress.update(
+            item=f"{event['tier']}:{event['status']}",
+            metrics={
+                "segments": event["segment_count"],
+                "facts": event["fact_count"],
+                "calls": event["logical_calls"],
+                "in_tok": event["input_tokens"],
+                "out_tok": event["output_tokens"],
+                "cost": event["known_cost"],
+                "latency_ms": event["latency_ms"],
+            },
+        )
 
     def complete(tier, prompt, max_new_tokens):
         response = client.complete(
@@ -278,6 +301,21 @@ def main() -> None:
             prompt_versions=prompt_versions,
             extraction_config=bundle.rl["extraction"],
             output_root=output_root,
+            audit_context={
+                "model_family": bundle.rl["model_family"],
+                "campaign_id": args.campaign_id or "",
+                "campaign_scope_hash": (campaign or {}).get(
+                    "campaign_scope_hash", ""
+                ),
+                "qdrant_namespace": namespace,
+                "qdrant_distance": storage_cfg.get("distance", "Cosine"),
+                "embedding_model_hash": embedding_hash,
+                "embedding_revision": embedding_cfg.get("revision", ""),
+                "embedding_normalized": bool(
+                    embedding_cfg.get("normalize", False)
+                ),
+            },
+            progress_callback=report_batch,
         )
         summary = generator.generate(
             extraction_segments,
@@ -376,10 +414,22 @@ def main() -> None:
                 "required_tiers": list(TIERS),
             }
         )
+        progress.close(
+            status=summary.status,
+            metrics={
+                "facts": sum(summary.fact_counts.values()),
+                "calls": summary.attempt_summary["logical_api_calls"],
+                "in_tok": summary.attempt_summary["provider_input_tokens"],
+                "out_tok": summary.attempt_summary["provider_output_tokens"],
+                "cost": summary.known_cost,
+                "repairs": summary.attempt_summary["repair_calls"],
+            },
+        )
         print(json.dumps(result_payload, ensure_ascii=False, indent=2))
         if summary.status != "complete" or not selected_reconciled:
             raise SystemExit(2)
     except BaseException as exc:
+        progress.close(status="failed", metrics={"error": type(exc).__name__})
         if not isinstance(exc, SystemExit):
             update_experiment_manifest(
                 manifest_path,

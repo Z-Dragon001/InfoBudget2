@@ -7,25 +7,34 @@ import json
 from pathlib import Path
 
 from infobudget.datasets.split_builder import build_longmemeval_manifests
+from infobudget.segmentation.identity import segmentation_artifact_name
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--method", default="nsp_text_tiling")
+    parser.add_argument(
+        "--method",
+        choices=("nsp_text_tiling", "bert_mlp_text_tiling"),
+        default="nsp_text_tiling",
+    )
+    parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=Path, default=Path("datasets/splits/longmemeval"))
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
+    if args.alpha < 0:
+        parser.error("--alpha must be non-negative")
     root = Path(__file__).resolve().parents[1]
+    segmentation_method = segmentation_artifact_name(args.method, args.alpha)
     fixed, cv5 = build_longmemeval_manifests(
         root,
-        segmentation_method=args.method,
+        segmentation_method=segmentation_method,
         seed=args.seed,
     )
     outputs = {
-        args.output_dir / f"fixed_80_10_10_seed{args.seed}_{args.method}.json": fixed,
-        args.output_dir / f"cv5_360_40_100_seed{args.seed}_{args.method}.json": cv5,
+        args.output_dir / f"fixed_80_10_10_seed{args.seed}_{segmentation_method}.json": fixed,
+        args.output_dir / f"cv5_360_40_100_seed{args.seed}_{segmentation_method}.json": cv5,
     }
     for path, payload in outputs.items():
         if path.exists() and not args.force:

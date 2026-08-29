@@ -37,7 +37,9 @@ them under the paths documented in `docs/hardware_and_environment_setup.md`. Con
 keys only through the environment variables named in `configs/models.yaml`.
 
 Formal LoCoMo and LongMemEval runs share one Qdrant server at
-`http://127.0.0.1:6333`, with dataset-specific collection namespaces. Start it before the
+`http://127.0.0.1:6333`, with model-family- and dataset-specific collection namespaces.
+Set `model_family` in the selected config directory to match its Qwen or Llama extraction
+roles. Start the server before the
 pipeline; the Linux Docker Compose deployment and lifecycle commands are documented in
 `docs/qdrant_server_deployment.md`. Candidate and S memories are still exported as local,
 per-sample JSON for human inspection, but training and evaluation read only Qdrant.
@@ -45,18 +47,20 @@ per-sample JSON for human inspection, but training and evaluation read only Qdra
 ## Pipeline
 
 ```powershell
-uv run python scripts/preprocess_datasets.py --datasets locomo longmemeval
-uv run python scripts/segment_datasets.py locomo full --method nsp_text_tiling
-uv run python scripts/segment_datasets.py locomo full --method bert_mlp_text_tiling
-uv run python scripts/build_longmemeval_splits.py
-uv run python scripts/manage_extraction_campaign.py init --campaign-id locomo_full_nsp_text_tiling --dataset locomo --split full --method nsp_text_tiling --run-prefix locomo_full
-Get-ChildItem datasets/segmented/locomo/full/nsp_text_tiling/samples/*/segments.jsonl | ForEach-Object { $runId = "locomo_full_nsp_text_tiling_$($_.Directory.Name)"; uv run python scripts/build_rl_candidates.py $_.FullName --extraction-run-id $runId --campaign-id locomo_full_nsp_text_tiling }
-pwsh -File scripts/build_longmemeval_rl_candidates.ps1 -Method nsp_text_tiling
-uv run python scripts/assemble_rl_baseline.py datasets/segmented/locomo/full/nsp_text_tiling/samples/<sample_id>/segments.jsonl --policy all-small
-uv run python scripts/train_rl_router.py locomo full --method nsp_text_tiling --campaign-id locomo_full_nsp_text_tiling --split-manifest datasets/splits/locomo/cv5_seed42.json --fold 0 --epochs 3 --steps-per-sample 10 --device auto
-uv run python scripts/evaluate_rl_assembly.py datasets/segmented/locomo/full/nsp_text_tiling/samples/<test_sample_id>/segments.jsonl --assembly-id <assembly_id> --split-manifest datasets/splits/locomo/cv5_seed42.json --fold 0 --partition test
-uv run python scripts/train_rl_router.py longmemeval full --method nsp_text_tiling --campaign-id longmemeval_full_nsp_text_tiling --split-manifest datasets/splits/longmemeval/fixed_80_10_10_seed42_nsp_text_tiling.json --fold 0 --epochs 10 --early-stopping-patience 3
+uv run python scripts/preprocess_datasets.py --datasets locomo
+uv run python scripts/preprocess_datasets.py --datasets longmemeval
+uv run python scripts/segment_datasets.py locomo full --method nsp_text_tiling --alpha 0.5
+uv run python scripts/segment_datasets.py longmemeval full --method nsp_text_tiling --alpha 0.5
+& .\scripts\build_locomo_rl_candidates.ps1 -Method nsp_text_tiling -Alpha 0.5
+& .\scripts\build_longmemeval_rl_candidates.ps1 -Method nsp_text_tiling -Alpha 0.5
+uv run python scripts/run_routed_cv_experiment.py locomo full --method nsp_text_tiling_alpha_0p5 --campaign-id locomo_full_nsp_text_tiling_alpha_0p5 --split-manifest datasets/splits/locomo/cv5_seed42.json --epochs 3 --steps-per-sample 10
 ```
+
+Parameterized segmentation artifacts are isolated under names such as
+`nsp_text_tiling_alpha_0p5`; training and full-experiment outputs add an `epochs_<N>`
+directory. Routed test extraction and QA/judging can be run independently with
+`evaluate_routed_deployment.py --stage extract` and `--stage qa`. See
+`docs/locomo_alpha_epoch_experiment_guide.md` for the five-stage commands and audit rules.
 
 For a resumable candidate run, assign a stable run ID and reuse the exact same segments
 file when recovering:
@@ -156,3 +160,78 @@ saves best/final checkpoints with the paired feature scaler.
 
 See `docs/rl_router_implementation.md` for module mapping, invariants, and operational
 limits.
+
+## Capability-conditioned quality router (primary research path)
+
+The primary method is now a supervised scalar scorer rather than a fixed three-class
+actor-critic. It concatenates a 384-dimensional
+`sentence-transformers/all-MiniLM-L6-v2` segment embedding, six leakage-safe structural
+features, and the frozen seven-dimensional MemoryPrint. The resulting 397-dimensional
+input predicts one `silver_strict_fact_f1` value for each `(segment, model)` pair. A
+deterministic multiple-choice budget optimizer then selects exactly one model per segment.
+The previous RL implementation remains available as an experimental baseline.
+
+MiniLM accepts at most 256 wordpieces per call. Router segment text therefore uses a fixed
+non-overlapping chunking rule, mean-pools the normalized chunk vectors, and normalizes the
+result again. Memory Fact and retrieval-query encoding retain the normal truncate behavior;
+all paths still produce exactly 384 dimensions.
+
+Download the pinned local embedding model once:
+
+```powershell
+uv run python scripts/download_local_models.py --role router
+```
+
+Existing candidate Fact text can be reused without repeating small/medium/large extraction.
+Copy it from an old 1024-dimensional namespace and re-embed it into the new namespace:
+
+```powershell
+uv run python scripts/reembed_candidate_collections.py <one-sample-segments.jsonl> `
+  --source-namespace <old-qdrant-namespace> `
+  --source-vector-size 1024 `
+  --extraction-run-id <candidate-extraction-run-id> `
+  --manifest <reembedding-manifest.json>
+```
+
+The quality-router artifact sequence is:
+
+```powershell
+# Requires frozen reference facts, candidate Fact exports, MemoryPrint profiles,
+# and pairwise equivalent/non-equivalent decisions from the fixed Judge.
+uv run python scripts/build_fact_quality_labels.py `
+  --segments <segmented-root> `
+  --references <reference_facts.jsonl> `
+  --candidates <candidate_facts.jsonl> `
+  --capabilities <model_capabilities.json> `
+  --judge-decisions <fact_equivalence_judgments.jsonl> `
+  --output <fact_quality_labels.jsonl>
+
+uv run python scripts/train_quality_router.py `
+  --segments <segmented-root> `
+  --train-labels <train_labels.jsonl> `
+  --validation-labels <validation_labels.jsonl> `
+  --capabilities <model_capabilities.json> `
+  --output-dir <quality-training-output>
+
+uv run python scripts/route_with_quality_budget.py `
+  --segments <test-segment-root> `
+  --capabilities <model_capabilities.json> `
+  --costs <segment_model_costs.jsonl> `
+  --checkpoint <quality-training-output/quality_scorer.pt> `
+  --budget <absolute-usd-budget> `
+  --output <routing_decisions.jsonl>
+
+uv run python scripts/assemble_quality_routes.py <one-sample-segments.jsonl> `
+  --decisions <routing_decisions.jsonl> `
+  --extraction-run-id <candidate-extraction-run-id>
+```
+
+`qa_retrieval_trace.jsonl` can be aggregated into segment usage artifact B with
+`scripts/aggregate_quality_validation.py usage`. Prejoined counterfactual rows in C are
+evaluated with the `consistency` command using sign agreement and Spearman correlation;
+the local-quality and QA-delta scales are never directly subtracted.
+
+The 384-dimensional embedding changes the Qdrant vector schema. Existing 1024-dimensional
+BGE-M3 collections remain historical artifacts and must not be reused. Collection names
+include the embedding directory hash, so freshly extracted MiniLM candidates receive a
+separate namespace automatically.

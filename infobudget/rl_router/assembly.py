@@ -37,6 +37,7 @@ class AssemblyManager:
         policy_version: str,
         router_type: str,
         candidate_extraction_run_id: str | None = None,
+        route_metadata: list[dict] | None = None,
     ) -> AssemblyResult:
         result = self.store.assemble(
             dataset_name=dataset_name,
@@ -50,7 +51,30 @@ class AssemblyManager:
         )
         created_at = datetime.now(timezone.utc).isoformat()
         probabilities = probabilities or [1.0] * len(segments)
-        for order, (segment, tier, probability) in enumerate(zip(segments, actions, probabilities), start=1):
+        route_metadata = route_metadata or [{} for _ in segments]
+        if not (
+            len(segments) == len(actions) == len(probabilities) == len(route_metadata)
+        ):
+            raise ValueError(
+                "segments, actions, probabilities, and route_metadata must have equal lengths"
+            )
+        allowed_metadata = {
+            "selected_model_id",
+            "selected_profile_id",
+            "predicted_quality",
+            "selected_cost",
+            "route_decision_id",
+            "quality_checkpoint_hash",
+            "budget_run_id",
+            "sample_budget",
+            "sample_total_selected_cost",
+        }
+        for order, (segment, tier, probability, metadata) in enumerate(
+            zip(segments, actions, probabilities, route_metadata), start=1
+        ):
+            unknown = sorted(set(metadata) - allowed_metadata)
+            if unknown:
+                raise ValueError(f"unsupported route metadata fields: {unknown}")
             self.ledger.append(
                 {
                     "assembly_id": result.assembly_id,
@@ -67,6 +91,7 @@ class AssemblyManager:
                     "point_count": result.point_count,
                     "created_at": created_at,
                     "cleaned_at": None,
+                    **metadata,
                 }
             )
         return result

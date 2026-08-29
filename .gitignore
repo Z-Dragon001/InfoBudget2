@@ -80,4 +80,9 @@ configs/secrets*.yaml
 *.log
 *.tmp
 *.temp
+tmp/
 deploy/qdrant/storage/
+
+
+#local delivery
+deliverables/**

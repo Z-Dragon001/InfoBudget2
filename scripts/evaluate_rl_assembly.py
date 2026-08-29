@@ -77,10 +77,13 @@ def main() -> None:
         local_path=bundle.project.root_dir / embedding["local_path"],
         dimension=embedding["dimension"],
         normalize=embedding["normalize"],
+        max_length=embedding.get("max_length"),
+        long_text_strategy=embedding.get("long_text_strategy", "truncate"),
     )
     storage = bundle.rl["storage"]
     namespace = resolve_collection_namespace(
         storage,
+        model_family=bundle.rl["model_family"],
         dataset=first.dataset_name,
         split=first.split,
         segmentation_version=first.segmentation_version,

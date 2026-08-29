@@ -18,15 +18,30 @@ def test_embedding_hash_is_part_of_collection_namespace() -> None:
     namespace = resolve_collection_namespace(
         {
             "collection_namespace": (
-                "{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v2"
+                "{model_family}_{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v3"
             )
         },
+        model_family="llama",
         dataset="longmemeval",
         split="full",
         segmentation_version="nsp_v1",
         embedding_hash="abcdef0123456789",
     )
-    assert namespace == "longmemeval_full_nsp_v1_abcdef012345_fact_v2"
+    assert namespace == "llama_longmemeval_full_nsp_v1_abcdef012345_fact_v3"
+    qwen_namespace = resolve_collection_namespace(
+        {
+            "collection_namespace": (
+                "{model_family}_{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v3"
+            )
+        },
+        model_family="qwen",
+        dataset="longmemeval",
+        split="full",
+        segmentation_version="nsp_v1",
+        embedding_hash="abcdef0123456789",
+    )
+    assert qwen_namespace != namespace
+    assert qwen_namespace.startswith("qwen_")
 
 
 def test_campaign_requires_all_runs_and_aggregate_quality_to_pass(tmp_path) -> None:
@@ -118,6 +133,7 @@ def test_campaign_pins_only_the_selected_dataset_prompt(tmp_path) -> None:
         project=SimpleNamespace(root_dir=tmp_path, models=roles),
         embeddings={"memory": {"local_path": "embedding"}},
         rl={
+            "model_family": "qwen",
             "extraction": {"quality_gates": {}},
             "storage": {"collection_namespace": "test-{dataset}"},
         },

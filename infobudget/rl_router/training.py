@@ -32,11 +32,17 @@ class ConstrainedActorCriticTrainer:
         budget: float,
         learning_rate: float = 3e-4,
         lambda_learning_rate: float = 1e-2,
+        value_loss_coefficient: float = 0.5,
+        entropy_coefficient: float = 0.01,
+        max_gradient_norm: float = 1.0,
         seed: int = 42,
     ):
         self.model = model
         self.budget = float(budget)
         self.lambda_learning_rate = float(lambda_learning_rate)
+        self.value_loss_coefficient = float(value_loss_coefficient)
+        self.entropy_coefficient = float(entropy_coefficient)
+        self.max_gradient_norm = float(max_gradient_norm)
         self.lagrange_multiplier = 0.0
         self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         random.seed(seed)
@@ -57,10 +63,14 @@ class ConstrainedActorCriticTrainer:
         policy_loss = -(distribution.log_prob(actions) * advantage).mean()
         value_loss = torch.nn.functional.mse_loss(values, target)
         entropy_bonus = distribution.entropy().mean()
-        loss = policy_loss + 0.5 * value_loss - 0.01 * entropy_bonus
+        loss = (
+            policy_loss
+            + self.value_loss_coefficient * value_loss
+            - self.entropy_coefficient * entropy_bonus
+        )
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm)
         self.optimizer.step()
         self.lagrange_multiplier = max(
             0.0,

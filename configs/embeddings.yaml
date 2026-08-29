@@ -1,11 +1,13 @@
 embeddings:
-  router: &bge_m3
-    model_name: "BAAI/bge-m3"
-    revision: "5617a9f61b028005a4858fdac845db406aefb181"
-    local_path: "./models/embeddings/bge-m3"
-    dimension: 1024
-    max_length: 8192
+  router: &all_minilm_l6_v2
+    model_name: "sentence-transformers/all-MiniLM-L6-v2"
+    revision: "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+    local_path: "./models/embeddings/all-MiniLM-L6-v2"
+    dimension: 384
+    max_length: 256
     normalize: true
+    long_text_strategy: "mean_pool_chunks"
     local_files_only: true
   memory:
-    <<: *bge_m3
+    <<: *all_minilm_l6_v2
+    long_text_strategy: "truncate"

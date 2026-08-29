@@ -10,7 +10,12 @@ from typing import Any
 
 from infobudget.rl_router.ledger import read_sqlite_ledger
 from infobudget.rl_router.qdrant_store import FactQdrantStore
-from infobudget.rl_router.schemas import TIERS
+from infobudget.rl_router.schemas import (
+    QDRANT_FACT_SCHEMA_VERSION,
+    SEGMENT_AUDIT_REQUIRED_FIELDS,
+    SEGMENT_AUDIT_SCHEMA_VERSION,
+    TIERS,
+)
 
 
 class ReconciliationError(RuntimeError):
@@ -83,6 +88,44 @@ def reconcile_extraction_run(
             for row in tier_state if row["status"] != "committed"
         )
         tier_ledger = [row for row in ledger_rows if row.get("tier") == tier]
+        if manifest.get("qdrant_point_schema_version") == QDRANT_FACT_SCHEMA_VERSION:
+            for row in tier_ledger:
+                missing_audit = [
+                    field
+                    for field in SEGMENT_AUDIT_REQUIRED_FIELDS
+                    if field not in row
+                ]
+                segment_id = row.get("segment_id")
+                if missing_audit:
+                    errors.append(
+                        f"{tier}: segment audit row {segment_id} is missing: "
+                        + ", ".join(missing_audit)
+                    )
+                if row.get("audit_schema_version") != SEGMENT_AUDIT_SCHEMA_VERSION:
+                    errors.append(
+                        f"{tier}: segment audit row {segment_id} has an unsupported "
+                        "schema version"
+                    )
+                if row.get("model_family") != manifest.get("model_family"):
+                    errors.append(
+                        f"{tier}: segment audit row {segment_id} model family does not "
+                        "match the run manifest"
+                    )
+                if row.get("qdrant_namespace") != manifest.get(
+                    "qdrant_collection_namespace"
+                ):
+                    errors.append(
+                        f"{tier}: segment audit row {segment_id} namespace does not "
+                        "match the run manifest"
+                    )
+                expected_status = (
+                    "no_fact" if int(row.get("fact_count", 0)) == 0 else "ok"
+                )
+                if row.get("status") != expected_status:
+                    errors.append(
+                        f"{tier}: segment audit row {segment_id} has inconsistent "
+                        "fact_count/status"
+                    )
         state_batches = {row["batch_id"] for row in committed_state}
         ledger_batches = {str(row.get("batch_id") or "") for row in tier_ledger}
         plan_count = int((planned.get(tier) or {}).get("batch_count", 0))

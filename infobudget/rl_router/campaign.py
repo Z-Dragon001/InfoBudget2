@@ -44,6 +44,7 @@ def initialize_campaign(
     prompt_role = bundle.fact_extraction_prompt_role(dataset_name)
     prompt_version = bundle.fact_extraction_prompt_version(dataset_name)
     scope = {
+        "model_family": bundle.rl["model_family"],
         "dataset_name": dataset_name,
         "split": split,
         "segmentation_method": segmentation_method,
@@ -212,6 +213,7 @@ def validate_campaign_environment(
     dataset_name = str(manifest.get("dataset_name") or "")
     prompt_role = bundle.fact_extraction_prompt_role(dataset_name)
     actual = {
+        "model_family": bundle.rl["model_family"],
         "embedding_model_hash": (
             precomputed_embedding_hash or memory_embedding_hash(bundle)
         ),

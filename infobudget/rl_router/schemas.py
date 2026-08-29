@@ -7,6 +7,59 @@ from typing import Any, Literal
 
 Tier = Literal["small", "medium", "large"]
 TIERS: tuple[Tier, ...] = ("small", "medium", "large")
+QDRANT_FACT_SCHEMA_VERSION = "qdrant_fact_v3"
+SEGMENT_AUDIT_SCHEMA_VERSION = "segment_extraction_audit_v1"
+SEGMENT_AUDIT_REQUIRED_FIELDS: tuple[str, ...] = (
+    "audit_schema_version",
+    "dataset_name",
+    "split",
+    "sample_id",
+    "session_id",
+    "model_family",
+    "campaign_id",
+    "campaign_scope_hash",
+    "extraction_scope_hash",
+    "qdrant_namespace",
+    "segmentation_method",
+    "segmentation_version",
+    "source_content_hash",
+    "segment_order",
+    "segment_start_turn",
+    "segment_end_turn",
+    "segment_turn_ids",
+    "segment_start_timestamp",
+    "segment_end_timestamp",
+    "segment_turn_count",
+    "segment_token_count",
+    "segment_char_count",
+    "extractor_configured_model",
+    "extractor_request_model",
+    "extractor_backend",
+    "prompt_version",
+    "prompt_sha256",
+    "embedding_model",
+    "embedding_dimension",
+    "embedding_model_hash",
+    "embedding_revision",
+    "embedding_normalized",
+    "qdrant_distance",
+    "input_price_per_1m",
+    "output_price_per_1m",
+    "price_effective_date",
+    "currency",
+    "extraction_run_id",
+    "batch_id",
+    "segment_id",
+    "tier",
+    "allocated_input_tokens",
+    "allocated_output_tokens",
+    "allocated_total_tokens",
+    "allocated_input_cost",
+    "allocated_output_cost",
+    "allocated_total_cost",
+    "fact_count",
+    "status",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,11 +183,40 @@ class FactRecord:
     created_at: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
+    @classmethod
+    def from_payload(cls, value: dict[str, Any]) -> "FactRecord":
+        """Reconstruct a FactRecord without discarding versioned provenance fields."""
+        payload = dict(value)
+        if "segment_hash" not in payload and "source_content_hash" in payload:
+            payload["segment_hash"] = payload["source_content_hash"]
+        field_names = set(cls.__dataclass_fields__)
+        constructor = {
+            name: payload[name]
+            for name in field_names - {"extra"}
+            if name in payload
+        }
+        required = {
+            item.name
+            for item in cls.__dataclass_fields__.values()
+            if item.name != "extra"
+            and item.default is MISSING
+            and item.default_factory is MISSING
+        }
+        missing = sorted(required - constructor.keys())
+        if missing:
+            raise ValueError(f"fact payload is missing required fields: {', '.join(missing)}")
+        constructor["source_turn_ids"] = [int(item) for item in constructor["source_turn_ids"]]
+        consumed = field_names | {"schema_version", "source_content_hash"}
+        constructor["extra"] = {
+            name: item for name, item in payload.items() if name not in consumed
+        }
+        return cls(**constructor)
+
     def payload(self) -> dict[str, Any]:
         value = asdict(self)
         value.pop("extra")
         value.update(self.extra)
-        value["schema_version"] = "qdrant_fact_v2"
+        value["schema_version"] = QDRANT_FACT_SCHEMA_VERSION
         value["source_content_hash"] = value.pop("segment_hash")
         return value
 

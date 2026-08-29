@@ -34,10 +34,18 @@ def test_five_api_roles_have_prices_and_environment_keys() -> None:
         for values in rl_bundle.rl["extraction"]["buffers"].values()
     } == {6}
     storage = rl_bundle.rl["storage"]
+    assert rl_bundle.embeddings["router"]["model_name"] == "sentence-transformers/all-MiniLM-L6-v2"
+    assert rl_bundle.embeddings["router"]["dimension"] == 384
+    assert rl_bundle.embeddings["memory"]["dimension"] == 384
+    assert rl_bundle.embeddings["router"]["long_text_strategy"] == "mean_pool_chunks"
+    assert rl_bundle.embeddings["memory"]["long_text_strategy"] == "truncate"
+    assert storage["vector_size"] == 384
+    assert rl_bundle.rl["model_family"] == "qwen"
     assert storage["mode"] == "server"
     assert storage["url"] == "http://127.0.0.1:6333"
     assert storage["grpc_port"] == 6334
     assert "{embedding_hash}" in storage["collection_namespace"]
+    assert "{model_family}" in storage["collection_namespace"]
     compose = yaml.safe_load(
         Path("deploy/qdrant/docker-compose.yml").read_text(encoding="utf-8")
     )

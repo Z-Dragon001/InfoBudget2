@@ -536,3 +536,53 @@ scripts/evaluate_routed_deployment.py
 7. 虚拟 replay 与真实部署成本误差，用于证明训练期成本代理的有效性和局限性。
 
 该口径既保留冻结候选训练的可行性，又通过最终 outer-test 的真实路由提取获得可信的部署成本和 API 调用数据。
+
+## 17. 当前代码实现（2026-08-06）
+
+方案已落到以下入口和模块：
+
+- `scripts/train_rl_router.py`：训练、验证选择、检查点哈希、训练状态断点续跑和完整 manifest 生命周期。
+- `scripts/evaluate_routed_deployment.py`：冻结 checkpoint 后，对一个 outer-test fold 执行确定性路由、selected-tier-only 真实提取、独立 S 组装和 QA 评估。
+- `scripts/run_routed_cv_experiment.py`：依照 split manifest 编排全部 fold 的训练与真实测试，并汇总 out-of-fold 指标。
+- `infobudget/rl_router/candidates.py`：候选提取和真实路由提取共用 `_flush`、repair、解析、`source_ids` 校验、usage、价格分配和 Qdrant 写入；`generate_routed` 只改变 segment 到 tier 的分配。
+- `infobudget/rl_router/deployment.py`：部署 namespace、路由不变量、提取费用与 Token 聚合。
+
+真实测试不会加入 candidate campaign，也不会写训练的 `candidate_ledger.sqlite3`。它使用 `deployment_ledger.sqlite3`、独立 extraction run ID 和独立 Qdrant namespace，但继续使用 `qdrant_fact_v2` payload 与现有 S assembly 结构。
+
+单个 fold 的入口示例：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\evaluate_routed_deployment.py longmemeval full `
+  --method nsp_text_tiling `
+  --split-manifest <split-manifest.json> `
+  --fold 0 `
+  --checkpoint <training-output\checkpoints\best.pt> `
+  --training-manifest <training-output\manifest.json> `
+  --campaign-id <complete-campaign-id>
+```
+
+完整预声明折实验入口示例：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_routed_cv_experiment.py longmemeval full `
+  --method nsp_text_tiling `
+  --split-manifest <split-manifest.json> `
+  --campaign-id <complete-campaign-id> `
+  --epochs 10 `
+  --steps-per-sample 1 `
+  --early-stopping-patience 3
+```
+
+不传 `--fold` 时，编排器运行 manifest 中全部预声明 fold；传入一个或多个 `--fold` 可用于正式实验前的受控检查。上述命令会触发真实付费 API，代码回归测试本身不会触发外部调用。
+
+每个 deployment run 产生：
+
+- `manifest.json`：冻结 split、fold、checkpoint、campaign、route、namespace 与运行状态；
+- `extraction/.../deployment_ledger.sqlite3`：batch 和 segment 级 Token/费用；
+- `extraction/runs/<run-id>/ledgers/run_ledger.sqlite3`：逻辑调用和传输 attempt；
+- `routing/ledger.sqlite3`：segment 到唯一 tier 的路由和 S 组装记录；
+- `qa/ledger.sqlite3`：Reader/Judge 结果、Token、费用、retry 和 attempts；
+- `samples/<sample-id>/result.json`：sample 级准确率、实际/虚拟提取成本和 QA 用量；
+- `aggregate.json`：fold 或全部 fold 的 micro accuracy、费用和 Token 汇总。
+
+当前自动化回归覆盖 60 项测试，其中包括真实路由提取“每段只进入一个 tier”、恢复幂等性以及双分母成本统计。正式付费实验前仍应先以预声明的少量非正式 fold/sample 做 API 与 Qdrant smoke test。

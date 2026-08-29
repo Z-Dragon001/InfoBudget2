@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 from infobudget.rl_router.config import RLConfigBundle, scan_config_secrets
 from infobudget.rl_router.embedding import directory_hash
 from infobudget.rl_router.ledger import atomic_write_json
+from infobudget.rl_router.schemas import QDRANT_FACT_SCHEMA_VERSION
 
 
 def create_experiment_manifest(
@@ -28,6 +30,7 @@ def create_experiment_manifest(
     manifest = {
         "experiment_id": scope.pop("experiment_id", datetime.now(timezone.utc).strftime("exp_%Y%m%dT%H%M%SZ")),
         **scope,
+        "model_family": bundle.rl["model_family"],
         "random_seed": bundle.rl["seed"],
         "models": {name: _safe_model(spec) for name, spec in bundle.project.models.items()},
         "price_snapshot": {name: vars_safe(price) for name, price in bundle.project.prices.items()},
@@ -39,7 +42,7 @@ def create_experiment_manifest(
         },
         "buffer_config": bundle.rl["extraction"],
         "router_config": bundle.rl["router"],
-        "qdrant_point_schema_version": "qdrant_fact_v2",
+        "qdrant_point_schema_version": QDRANT_FACT_SCHEMA_VERSION,
         "qdrant_storage": safe_qdrant_storage_config(bundle.rl["storage"]),
         "git_commit": _git_commit(bundle.project.root_dir),
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -61,10 +64,15 @@ def resolve_collection_namespace(
     split: str,
     segmentation_version: str,
     embedding_hash: str,
+    model_family: str,
 ) -> str:
     if not embedding_hash:
         raise ValueError("embedding_hash is required for the Qdrant namespace")
+    normalized_family = str(model_family).strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", normalized_family):
+        raise ValueError("model_family is invalid for the Qdrant namespace")
     return str(storage["collection_namespace"]).format(
+        model_family=normalized_family,
         dataset=dataset,
         split=split,
         segmentation_version=segmentation_version,

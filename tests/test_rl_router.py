@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
+import hashlib
 import json
 import numpy as np
 import pytest
@@ -25,6 +26,7 @@ from infobudget.rl_router.api import (
     require_api_keys,
 )
 from infobudget.rl_router.candidates import (
+    CandidateGenerationSummary,
     CandidateGenerator,
     ProviderCircuitOpenError,
     _allowed_source_ids,
@@ -33,10 +35,19 @@ from infobudget.rl_router.candidates import (
     _source_provenance,
     batch_output_token_limit,
     estimate_candidate_plan,
+    estimate_routed_plan,
     prepare_extraction_segments,
+    prepare_routed_extraction_segments,
 )
 from infobudget.rl_router.config import load_rl_bundle
 from infobudget.rl_router.costs import allocate_batch, normalize_virtual_cost, replay_virtual_cost
+from infobudget.rl_router.deployment import (
+    build_question_outcomes,
+    summarize_deployment_costs,
+    summarize_qa_usage,
+    summarize_question_outcomes,
+    validate_route_decisions,
+)
 from infobudget.rl_router.evaluation import (
     LightMemLLMJudge,
     LightMemQAReader,
@@ -46,7 +57,9 @@ from infobudget.rl_router.evaluation import (
     select_judge_prompt,
 )
 from infobudget.rl_router.export import export_memories
+from infobudget.rl_router.experiment_identity import epoch_artifact_name
 from infobudget.rl_router.ledger import SqliteLedger, atomic_write_json, read_sqlite_ledger
+from infobudget.rl_router.metrics import summarize_fold_accuracy
 from infobudget.rl_router.parsing import (
     parse_fact_batch,
     render_extraction_prompt,
@@ -67,6 +80,22 @@ from infobudget.rl_router.training_io import load_replay_history
 from infobudget.schemas import ModelSpec, PriceSpec
 
 TIER_ID = {"small": 1, "medium": 2, "large": 3}
+
+
+def test_epoch_artifact_name_is_stable_and_rejects_invalid_values() -> None:
+    assert epoch_artifact_name(1) == "epochs_1"
+    assert epoch_artifact_name(10) == "epochs_10"
+    with pytest.raises(ValueError, match="epochs must be positive"):
+        epoch_artifact_name(0)
+
+
+def test_fold_accuracy_summary_reports_sample_stability() -> None:
+    summary = summarize_fold_accuracy([0.6, 0.8, 1.0])
+    assert summary["mean_fold_accuracy_micro"] == pytest.approx(0.8)
+    assert summary["std_fold_accuracy_micro"] == pytest.approx(0.2)
+    assert summary["sem_fold_accuracy_micro"] == pytest.approx(0.2 / np.sqrt(3))
+    assert summary["min_fold_accuracy_micro"] == pytest.approx(0.6)
+    assert summary["max_fold_accuracy_micro"] == pytest.approx(1.0)
 
 
 def _sqlite_ledger_process_worker(path: str, worker: int) -> None:
@@ -134,7 +163,7 @@ def test_qdrant_server_config_uses_remote_client_and_payload_indexes(monkeypatch
         "prefer_grpc": False,
         "grpc_port": 6334,
     }
-    assert len(clients[1].indexes) == 4 * 10
+    assert len(clients[1].indexes) == 4 * 12
     assert all(wait is True for *_, wait in clients[1].indexes)
     store.close()
 
@@ -807,6 +836,7 @@ def test_candidate_generation_repairs_json_audits_and_resumes_without_new_calls(
         },
     }
     store = FactQdrantStore("unused", "repair_resume", 4, in_memory=True)
+    progress_events = []
     generator = CandidateGenerator(
         store=store,
         encoder=_FakeEncoder(),
@@ -818,17 +848,24 @@ def test_candidate_generation_repairs_json_audits_and_resumes_without_new_calls(
         prompt_versions={tier: "test-v1" for tier in models},
         extraction_config=config,
         output_root=tmp_path,
+        progress_callback=progress_events.append,
     )
     first = generator.generate([segment], "repair-run")
     assert first.status == "complete"
     assert first.fact_counts == {"small": 1, "medium": 1, "large": 1}
     assert first.attempt_summary["repair_calls"] == 3
     assert len(calls) == 6
+    assert len(progress_events) == 3
+    assert {event["tier"] for event in progress_events} == set(models)
+    assert all(event["status"] == "committed" for event in progress_events)
+    assert all(event["fact_count"] == 1 for event in progress_events)
+    assert all(event["logical_calls"] == 2 for event in progress_events)
 
     resumed = generator.generate([segment], "repair-run", resume=True)
     assert resumed.status == "complete"
     assert resumed.fact_counts == first.fact_counts
     assert len(calls) == 6
+    assert len(progress_events) == 6
 
     with pytest.raises(ValueError, match="already exists"):
         generator.generate([segment], "repair-run")
@@ -959,6 +996,363 @@ def test_candidate_tiers_can_run_independently_under_one_run_id(tmp_path) -> Non
     assert all(row["extraction_visible_source_ids"] == [0] for row in cost_rows)
     assert all(row["extraction_dropped_source_ids"] == [1] for row in cost_rows)
     store.close()
+
+
+def test_segment_audit_keeps_zero_fact_segments_and_full_provenance(tmp_path) -> None:
+    segments = [
+        replace(
+            _segment(index),
+            text=(
+                f"[2026-01-0{index}T00:00:00.000, Thu] "
+                f"{index - 1}.Alice: source {index}."
+            ),
+            turn_ids=(index,),
+            token_count=10 + index,
+        )
+        for index in (1, 2)
+    ]
+    prompt = "{router_level}\n{information_score}\n{segment_text}"
+    model = ModelSpec(
+        deploy="api",
+        backend="openai_compatible",
+        model_name="configured-small",
+        tokenizer_name="small",
+        max_context_tokens=4096,
+        tensor_parallel_size=1,
+        dtype="n/a",
+        max_output_tokens=1024,
+        api_base_url="https://provider.example/v1",
+        request_model_name="resolved-small",
+    )
+    config = {
+        "max_facts_per_segment": 10,
+        "reserve_output_tokens_per_segment": 64,
+        "schema_repair_max_attempts": 0,
+        "require_provider_usage": True,
+        "buffers": {
+            "small": {
+                "max_segments": 2,
+                "max_input_tokens": 1000,
+                "max_total_context_tokens": 2000,
+            }
+        },
+    }
+
+    def complete(tier, _rendered, _max_new_tokens):
+        return BatchCompletion(
+            json.dumps(
+                {
+                    "processed_segment_ids": [item.segment_id for item in segments],
+                    "data": [
+                        {
+                            "segment_id": segments[0].segment_id,
+                            "source_ids": [0],
+                            "fact": "Only the first segment produced a fact.",
+                        }
+                    ],
+                }
+            ),
+            ProviderUsage(
+                30,
+                8,
+                "resolved-small",
+                latency_ms=17,
+                provider_request_id="request-1",
+            ),
+        )
+
+    store = FactQdrantStore("unused", "qwen_audit", 4, in_memory=True)
+    generator = CandidateGenerator(
+        store=store,
+        encoder=_FakeEncoder(),
+        models={"small": model},
+        prices={"small": PriceSpec(1.0, 2.0, "USD", "2026-08-08")},
+        token_counters={"small": lambda text: len(text.split())},
+        completion=complete,
+        prompts={"small": prompt},
+        prompt_versions={"small": "test-v1"},
+        extraction_config=config,
+        output_root=tmp_path,
+        audit_context={
+            "model_family": "qwen",
+            "campaign_id": "qwen-campaign",
+            "campaign_scope_hash": "campaign-scope",
+            "qdrant_namespace": "qwen_audit",
+            "qdrant_distance": "Cosine",
+            "embedding_model_hash": "embedding-hash",
+            "embedding_revision": "embedding-revision",
+            "embedding_normalized": True,
+        },
+    )
+    summary = generator.generate(segments, "audit-run", tiers=("small",))
+    assert summary.status == "complete"
+    ledger_path = (
+        tmp_path
+        / "locomo"
+        / "train"
+        / segments[0].segmentation_method
+        / "samples"
+        / segments[0].sample_id
+        / "extraction"
+        / "candidate_ledger.sqlite3"
+    )
+    rows = read_sqlite_ledger(ledger_path, "segment_costs")
+    assert len(rows) == 2
+    by_segment = {row["segment_id"]: row for row in rows}
+    assert by_segment[segments[0].segment_id]["fact_count"] == 1
+    assert by_segment[segments[0].segment_id]["status"] == "ok"
+    assert by_segment[segments[1].segment_id]["fact_count"] == 0
+    assert by_segment[segments[1].segment_id]["status"] == "no_fact"
+    zero = by_segment[segments[1].segment_id]
+    assert zero["audit_schema_version"] == "segment_extraction_audit_v1"
+    assert zero["model_family"] == "qwen"
+    assert zero["campaign_id"] == "qwen-campaign"
+    assert zero["segment_turn_count"] == 1
+    assert zero["segment_token_count"] == 12
+    assert zero["extractor_request_model"] == "resolved-small"
+    assert zero["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
+    assert zero["batch_logical_call_count"] == 1
+    assert zero["batch_latency_ms"] == 17
+    assert zero["batch_provider_request_ids"] == ["request-1"]
+
+    points = store.candidate_points(
+        "small",
+        dataset_name="locomo",
+        split="train",
+        sample_id=segments[0].sample_id,
+        extraction_run_id="audit-run",
+        with_vectors=False,
+    )
+    assert len(points) == 1
+    assert points[0].payload["schema_version"] == "qdrant_fact_v3"
+    assert points[0].payload["model_family"] == "qwen"
+    assert points[0].payload["campaign_id"] == "qwen-campaign"
+    store.close()
+
+
+def test_routed_generation_extracts_each_segment_once_in_only_its_selected_tier(tmp_path) -> None:
+    tiers = ("small", "medium", "large")
+    segments = [
+        replace(
+            _segment(index),
+            text=f"[2026-01-01T00:00:00.000, Thu] {index - 1}.Alice: durable fact {index}.",
+            turn_ids=(index,),
+        )
+        for index in range(1, 4)
+    ]
+    actions = ["small", "large", "small"]
+    models = {
+        tier: ModelSpec("api", "openai_compatible", tier, tier, 4096, 1, "n/a", 1024)
+        for tier in tiers
+    }
+    prompts = {tier: "{router_level}\n{information_score}\n{segment_text}" for tier in tiers}
+    config = {
+        "max_facts_per_segment": 10,
+        "reserve_output_tokens_per_segment": 64,
+        "schema_repair_max_attempts": 0,
+        "require_provider_usage": True,
+        "buffers": {
+            tier: {
+                "max_segments": 1,
+                "max_input_tokens": 1000,
+                "max_total_context_tokens": 2000,
+            }
+            for tier in tiers
+        },
+    }
+    calls = []
+
+    def complete(tier, prompt, _max_new_tokens):
+        segment = next(item for item in segments if item.segment_id in prompt)
+        calls.append((segment.segment_id, tier))
+        return BatchCompletion(
+            json.dumps(
+                {
+                    "processed_segment_ids": [segment.segment_id],
+                    "data": [
+                        {
+                            "segment_id": segment.segment_id,
+                            "source_ids": [segment.turn_ids[0] - 1],
+                            "fact": f"A standalone fact extracted by {tier}.",
+                        }
+                    ],
+                }
+            ),
+            ProviderUsage(10, 4, tier),
+        )
+
+    counters = {tier: lambda text: len(text.split()) for tier in tiers}
+    prepared, truncation = prepare_routed_extraction_segments(
+        segments=segments,
+        actions=actions,
+        prompts=prompts,
+        extraction_config=config,
+        token_counters=counters,
+    )
+    assert prepared == segments
+    assert truncation == {"small": {}, "large": {}}
+    plan = estimate_routed_plan(
+        segments=prepared,
+        actions=actions,
+        prompts=prompts,
+        extraction_config=config,
+        token_counters=counters,
+        models=models,
+        prices={tier: PriceSpec(1.0, 2.0) for tier in tiers},
+    )
+    assert {tier: plan[tier]["segment_count"] for tier in tiers} == {
+        "small": 2,
+        "medium": 0,
+        "large": 1,
+    }
+
+    store = FactQdrantStore("unused", "routed", 4, in_memory=True)
+    generator = CandidateGenerator(
+        store=store,
+        encoder=_FakeEncoder(),
+        models=models,
+        prices={tier: PriceSpec(1.0, 2.0) for tier in tiers},
+        token_counters=counters,
+        completion=complete,
+        prompts=prompts,
+        prompt_versions={tier: "test-v1" for tier in tiers},
+        extraction_config=config,
+        output_root=tmp_path,
+        ledger_filename="deployment_ledger.sqlite3",
+    )
+    summary = generator.generate_routed(
+        prepared,
+        actions,
+        "deployment-run",
+        route_scope={"fold": 0, "checkpoint_sha256": "abc"},
+    )
+    assert summary.status == "complete"
+    assert calls == [
+        (segments[0].segment_id, "small"),
+        (segments[2].segment_id, "small"),
+        (segments[1].segment_id, "large"),
+    ]
+    assert summary.fact_counts == {"small": 2, "medium": 0, "large": 1}
+    assert summary.attempt_summary["logical_api_calls"] == 3
+    assert summary.attempt_summary["provider_input_tokens"] == 30
+    for segment, selected_tier in zip(segments, actions):
+        for tier in tiers:
+            points = store.candidate_points(
+                tier,
+                dataset_name=segment.dataset_name,
+                split=segment.split,
+                sample_id=segment.sample_id,
+                segment_id=segment.segment_id,
+                extraction_run_id="deployment-run",
+            )
+            assert len(points) == (1 if tier == selected_tier else 0)
+    resumed = generator.generate_routed(
+        prepared,
+        actions,
+        "deployment-run",
+        resume=True,
+        route_scope={"fold": 0, "checkpoint_sha256": "abc"},
+    )
+    assert resumed.fact_counts == summary.fact_counts
+    assert len(calls) == 3
+    store.close()
+
+
+def test_deployment_cost_summary_reports_both_denominators() -> None:
+    summary = CandidateGenerationSummary(
+        sample_id="sample-1",
+        extraction_run_id="run",
+        fact_counts={"small": 1, "medium": 0, "large": 0},
+        batch_counts={"small": 1, "medium": 0, "large": 0},
+        batch_status_counts={"committed": 1},
+        batch_status_by_tier={"small": {"committed": 1}, "medium": {}, "large": {}},
+        selected_tiers=["small"],
+        status="complete",
+        known_cost=0.6,
+        unknown_cost_attempts=0,
+        attempt_summary={
+            "logical_api_calls": 2,
+            "successful_attempts": 2,
+            "failed_attempts": 0,
+            "repair_calls": 1,
+            "provider_input_tokens": 100,
+            "provider_output_tokens": 20,
+        },
+        quality_metrics={},
+    )
+    result = summarize_deployment_costs([summary], question_count=3)
+    assert result["per_sample"]["cost"] == pytest.approx(0.6)
+    assert result["per_question"]["amortized_extraction_cost"] == pytest.approx(0.2)
+    assert result["per_extraction_call"]["input_tokens"] == pytest.approx(50)
+    assert validate_route_decisions([_segment()], ["small"])
+    with pytest.raises(ValueError, match="exactly one action"):
+        validate_route_decisions([_segment()], [])
+
+
+def test_question_metrics_match_lightmem_category_and_population_std() -> None:
+    questions = [
+        {
+            "question_id": "q1",
+            "category": "category_1",
+            "question_type": "single-hop",
+        },
+        {
+            "question_id": "q2",
+            "category": "category_1",
+            "question_type": "single-hop",
+        },
+        {
+            "question_id": "q3",
+            "category": "category_2",
+            "question_type": "temporal",
+        },
+        {
+            "question_id": "q4",
+            "category": "category_2",
+            "question_type": "temporal",
+        },
+    ]
+    evaluations = [
+        SimpleNamespace(question_id="q1", correct=True),
+        SimpleNamespace(question_id="q2", correct=False),
+        SimpleNamespace(question_id="q3", correct=True),
+        SimpleNamespace(question_id="q4", correct=True),
+    ]
+    outcomes = build_question_outcomes(questions, evaluations)
+    result = summarize_question_outcomes(outcomes)
+
+    assert result["overall"]["judge_correct"] == {
+        "mean": 0.75,
+        "std": pytest.approx(np.sqrt(0.75 * 0.25)),
+        "count": 4,
+    }
+    assert result["by_category"]["category_1"]["accuracy"] == 0.5
+    assert result["by_category"]["category_2"]["accuracy"] == 1.0
+    assert result["category_distribution"]["category_1"]["fraction"] == 0.5
+    assert result["by_question_type"]["temporal"]["count"] == 2
+
+
+def test_qa_usage_accepts_ledger_dicts_for_resume_backfill() -> None:
+    result = summarize_qa_usage(
+        [
+            {
+                "reader_input_tokens": 100,
+                "reader_output_tokens": 10,
+                "reader_input_cost": 0.1,
+                "reader_output_cost": 0.02,
+                "reader_retry_count": 1,
+                "judge_input_tokens": 20,
+                "judge_output_tokens": 2,
+                "judge_input_cost": 0.03,
+                "judge_output_cost": 0.01,
+                "judge_retry_count": 0,
+            }
+        ]
+    )
+    assert result["reader"]["total_tokens"] == 110
+    assert result["reader"]["transport_attempts"] == 2
+    assert result["judge"]["total_tokens"] == 22
+    assert result["total_tokens"] == 132
 
 
 def test_candidate_generation_continues_after_transport_failure_and_resume_finishes(tmp_path) -> None:

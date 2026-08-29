@@ -1,5 +1,6 @@
 schema_version: "rl_router_v1"
 seed: 42
+model_family: "qwen"
 
 prompts:
   fact_extraction_locomo: "locomo_memory_extraction.txt"
@@ -54,8 +55,8 @@ storage:
   prefer_grpc: false
   timeout_seconds: 300
   api_key_env: ""
-  collection_namespace: "{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v2"
-  vector_size: 1024
+  collection_namespace: "{model_family}_{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v3"
+  vector_size: 384
   distance: "Cosine"
   require_sample_filter: true
   require_assembly_filter_for_s: true
@@ -63,17 +64,24 @@ storage:
 router:
   type: "embedding_mlp"
   algorithm: "actor_critic_lagrangian"
+  decision_process: "contextual_bandit"
   actions: ["small", "medium", "large"]
   hidden_dimensions: [512, 128]
   dropout: 0.1
   budget: 0.5
   learning_rate: 0.0003
   lambda_learning_rate: 0.01
+  value_loss_coefficient: 0.5
+  entropy_coefficient: 0.01
+  max_gradient_norm: 1.0
   gamma: 1.0
 
 evaluation:
   retrieval_top_k: 20
   objective_cost_scope: "memory_extraction_only"
+  excluded_categories_by_dataset:
+    locomo: ["category_5"]
+    longmemeval: []
   reader_max_new_tokens: 256
   judge_max_new_tokens: 128
   judge_temperature: 0.0

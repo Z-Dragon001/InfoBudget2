@@ -54,9 +54,9 @@ episode, consolidation, fixed-percentile routing, and legacy memory paths have b
 - Full-data extraction is grouped by an immutable campaign manifest. Training accepts only
   a complete campaign whose sample runs share one scope hash and whose aggregate empty-fact,
   15-fact saturation, schema-repair, and failed-batch rates pass configured thresholds.
-- Qdrant collection namespaces include the first 12 hexadecimal characters of the local
-  memory-embedding directory hash. Existing collection vector size and distance are checked
-  before any paid extraction request.
+- Qdrant collection namespaces include the configured model family and the first 12
+  hexadecimal characters of the local memory-embedding directory hash. Existing collection
+  vector size and distance are checked before any paid extraction request.
 - Formal embedding/tokenizer adapters use local paths and fail if files are missing; there
   is no hashing fallback in the RL path.
 - Router features accept only segment text and structural counts. Questions, answers,
@@ -69,7 +69,9 @@ Candidate generation writes Qdrant points plus cross-process-safe `batches`,
 `segment_costs`, and `failures` tables in `candidate_ledger.sqlite3`. Attempt audit rows
 live in each run's `run_ledger.sqlite3`. Assembly, QA, validation, and training ledgers also
 use SQLite WAL databases. Legacy JSONL extraction ledgers are imported read-only on first
-resume. Training writes best/final checkpoints alongside its SQLite ledger.
+resume. Every processed segment has one `segment_costs` row per extracted tier, including
+`fact_count=0`/`status=no_fact` rows that cannot be represented by a Qdrant Fact point.
+Training writes best/final checkpoints alongside its SQLite ledger.
 
 Candidate Qdrant persistence is a batch-scoped replace: delete every Point matching
 dataset/split/sample/run/batch in the selected tier, upsert the current response, and audit

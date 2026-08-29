@@ -7,7 +7,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from string import Template
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from infobudget.rl_router.api import ChatCompletionClient, OpenAICompatibleClient
 from infobudget.rl_router.config import RLConfigBundle
@@ -26,6 +26,8 @@ class ReaderResult:
     latency_ms: int = 0
     input_cost: float = 0.0
     output_cost: float = 0.0
+    retry_count: int = 0
+    attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -39,6 +41,8 @@ class JudgeResult:
     latency_ms: int = 0
     input_cost: float = 0.0
     output_cost: float = 0.0
+    retry_count: int = 0
+    attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -62,6 +66,10 @@ class QAEvaluation:
     reader_latency_ms: int = 0
     judge_latency_ms: int = 0
     judge_raw_response: str = ""
+    reader_retry_count: int = 0
+    judge_retry_count: int = 0
+    reader_attempts: list[dict[str, Any]] = field(default_factory=list)
+    judge_attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
 class QAReader(Protocol):
@@ -134,6 +142,8 @@ class LightMemQAReader:
             latency_ms=response.latency_ms,
             input_cost=input_cost,
             output_cost=output_cost,
+            retry_count=response.retry_count,
+            attempts=response.attempts or [],
         )
 
 
@@ -178,6 +188,8 @@ class LightMemLLMJudge:
             latency_ms=response.latency_ms,
             input_cost=input_cost,
             output_cost=output_cost,
+            retry_count=response.retry_count,
+            attempts=response.attempts or [],
         )
 
 
@@ -259,6 +271,10 @@ class AssemblyEvaluator:
             reader_latency_ms=reader_result.latency_ms,
             judge_latency_ms=judge_result.latency_ms,
             judge_raw_response=judge_result.raw_response,
+            reader_retry_count=reader_result.retry_count,
+            judge_retry_count=judge_result.retry_count,
+            reader_attempts=reader_result.attempts,
+            judge_attempts=judge_result.attempts,
         )
         if self.ledger is not None:
             self.ledger.append(
@@ -267,6 +283,10 @@ class AssemblyEvaluator:
                     "dataset_name": dataset_name,
                     "split": split,
                     "sample_id": sample_id,
+                    "category": str(question.get("category") or ""),
+                    "question_type": str(question.get("question_type") or ""),
+                    "judge_profile": str(question.get("judge_profile") or "generic"),
+                    "is_unanswerable": bool(question.get("is_unanswerable")),
                     **asdict(result),
                 }
             )
@@ -277,12 +297,17 @@ class AssemblyEvaluator:
         questions: list[dict],
         *,
         sample_metadata: dict[str, Any] | None = None,
+        progress_callback: Callable[[QAEvaluation], None] | None = None,
         **scope: str,
     ) -> tuple[float, list[QAEvaluation]]:
-        results = [
-            self.evaluate_question(question, sample_metadata=sample_metadata, **scope)
-            for question in questions
-        ]
+        results = []
+        for question in questions:
+            result = self.evaluate_question(
+                question, sample_metadata=sample_metadata, **scope
+            )
+            results.append(result)
+            if progress_callback is not None:
+                progress_callback(result)
         return (sum(item.correct for item in results) / len(results) if results else 0.0), results
 
 

@@ -90,6 +90,7 @@ class RLExperimentTrainer:
                 )
                 if assembly.status != "ready":
                     raise RuntimeError(f"assembly failed for {episode_id}")
+                state["assembly"] = assembly
                 qa_score, evaluations = self.evaluator.evaluate_sample(
                     questions,
                     dataset_name=first.dataset_name,
@@ -102,7 +103,17 @@ class RLExperimentTrainer:
                 state.update(assembly=assembly, evaluations=evaluations, cost=cost)
                 return qa_score, normalize(cost.total_cost)
 
-            step = self.trainer.step(features, evaluate)
+            try:
+                step = self.trainer.step(features, evaluate)
+            except BaseException:
+                assembly = state.get("assembly")
+                if assembly is not None:
+                    self.assembly_manager.cleanup(
+                        assembly,
+                        dataset_name=first.dataset_name,
+                        split=first.split,
+                    )
+                raise
             history.append(step)
             assembly = state["assembly"]
             cost = state["cost"]
