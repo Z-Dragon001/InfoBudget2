@@ -28,6 +28,10 @@ class ReferencePipelineConfig:
     timeout_seconds: int
     max_retries: int
     retry_backoff_seconds: float
+    cloudflare_request_interval_seconds: float
+    cloudflare_402_backoff_seconds: tuple[float, ...]
+    cloudflare_circuit_pause_seconds: float
+    cloudflare_max_auto_resumes: int
     fact_type_priority: tuple[str, ...]
 
     def canonical_hash(self) -> str:
@@ -67,6 +71,17 @@ def load_reference_config(path: str | Path) -> ReferencePipelineConfig:
         timeout_seconds=int(api.get("timeout_seconds", 120)),
         max_retries=int(api.get("max_retries", 3)),
         retry_backoff_seconds=float(api.get("retry_backoff_seconds", 1.0)),
+        cloudflare_request_interval_seconds=float(
+            api.get("cloudflare_request_interval_seconds", 3.0)
+        ),
+        cloudflare_402_backoff_seconds=tuple(
+            float(item)
+            for item in api.get("cloudflare_402_backoff_seconds", (60, 120, 300))
+        ),
+        cloudflare_circuit_pause_seconds=float(
+            api.get("cloudflare_circuit_pause_seconds", 300.0)
+        ),
+        cloudflare_max_auto_resumes=int(api.get("cloudflare_max_auto_resumes", 2)),
         fact_type_priority=tuple(str(item) for item in ranking.get("fact_type_priority", ())),
     )
     _validate(config)
@@ -105,4 +120,13 @@ def _validate(config: ReferencePipelineConfig) -> None:
         raise ValueError("max_raw_facts must be >= max_reference_facts")
     if config.max_retries < 0 or config.retry_backoff_seconds < 0:
         raise ValueError("API retry values cannot be negative")
-
+    if config.cloudflare_request_interval_seconds < 0:
+        raise ValueError("cloudflare_request_interval_seconds cannot be negative")
+    if not config.cloudflare_402_backoff_seconds or any(
+        value < 0 for value in config.cloudflare_402_backoff_seconds
+    ):
+        raise ValueError("cloudflare_402_backoff_seconds must be a non-empty non-negative list")
+    if config.cloudflare_circuit_pause_seconds < 0:
+        raise ValueError("cloudflare_circuit_pause_seconds cannot be negative")
+    if config.cloudflare_max_auto_resumes < 0:
+        raise ValueError("cloudflare_max_auto_resumes cannot be negative")

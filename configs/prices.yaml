@@ -22,3 +22,9 @@ prices:
     official_price_out_per_1m: 0.60
     currency: "USD"
     price_effective_date: "2026-08-02"
+
+  openai/gpt-4o-mini:
+    official_price_in_per_1m: 0.15
+    official_price_out_per_1m: 0.60
+    currency: "USD"
+    price_effective_date: "2026-08-30"

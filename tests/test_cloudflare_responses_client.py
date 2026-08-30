@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import urllib.error
+from io import BytesIO
 
 import pytest
 
@@ -8,6 +10,7 @@ from infobudget.rl_router.api import LLMResponse, ModelAPIError
 from infobudget.schemas import ModelSpec
 from reference_fact_pipeline.cloudflare_api import (
     CloudflareResponsesClient,
+    CloudflareWholesaleRateLimitError,
     ReferenceAPIClient,
     cloudflare_responses_endpoint,
     parse_cloudflare_responses_response,
@@ -179,3 +182,85 @@ def test_backend_router_keeps_chat_and_responses_transports_separate():
 def test_cloudflare_endpoint_rejects_unresolved_or_invalid_account_id():
     with pytest.raises(ModelAPIError, match="invalid Cloudflare account ID"):
         cloudflare_responses_endpoint(_cloudflare_model(), account_id="bad/account")
+
+
+def _wholesale_402() -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://example.invalid/responses",
+        402,
+        "Payment Required",
+        {},
+        BytesIO(
+            b'{"error":{"code":"invalid_prompt","message":"Wholesale rate limit exceeded for this gateway. Please reduce request rate or use BYOK."}}'
+        ),
+    )
+
+
+def test_wholesale_402_uses_long_backoff_then_recovers(monkeypatch):
+    monkeypatch.setenv("TEST_CLOUDFLARE_TOKEN", "secret-token")
+    monkeypatch.setenv("TEST_CLOUDFLARE_ACCOUNT", "account123")
+    calls = 0
+    sleeps = []
+
+    def fake_urlopen(_request, timeout):
+        nonlocal calls
+        calls += 1
+        if calls <= 3:
+            raise _wholesale_402()
+        return _FakeResponse(
+            {
+                "id": "resp-recovered",
+                "status": "completed",
+                "output_text": '{"facts":[]}',
+                "usage": {"input_tokens": 10, "output_tokens": 3},
+            }
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("reference_fact_pipeline.cloudflare_api.time.sleep", sleeps.append)
+    result = CloudflareResponsesClient(
+        max_retries=0,
+        account_id_env="TEST_CLOUDFLARE_ACCOUNT",
+        wholesale_402_backoff_seconds=(60.0, 120.0, 300.0),
+    ).complete(
+        model_spec=_cloudflare_model(),
+        prompt="Return JSON only.",
+        max_new_tokens=100,
+        json_mode=True,
+    )
+    assert result.content == '{"facts":[]}'
+    assert result.retry_count == 3
+    assert sleeps == [60.0, 120.0, 300.0]
+
+
+def test_persistent_wholesale_402_opens_campaign_circuit(monkeypatch):
+    monkeypatch.setenv("TEST_CLOUDFLARE_TOKEN", "secret-token")
+    monkeypatch.setenv("TEST_CLOUDFLARE_ACCOUNT", "account123")
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(_wholesale_402()))
+    monkeypatch.setattr("reference_fact_pipeline.cloudflare_api.time.sleep", lambda _delay: None)
+    client = CloudflareResponsesClient(
+        max_retries=0,
+        account_id_env="TEST_CLOUDFLARE_ACCOUNT",
+        wholesale_402_backoff_seconds=(60.0, 120.0, 300.0),
+    )
+    with pytest.raises(CloudflareWholesaleRateLimitError) as error:
+        client.complete(
+            model_spec=_cloudflare_model(),
+            prompt="Return JSON only.",
+            max_new_tokens=100,
+            json_mode=True,
+        )
+    assert len(error.value.attempts) == 4
+
+
+def test_cloudflare_request_interval_is_enforced(monkeypatch):
+    clock = iter((100.0, 100.0, 101.0, 103.0))
+    sleeps = []
+    monkeypatch.setattr(
+        "reference_fact_pipeline.cloudflare_api.time.monotonic", lambda: next(clock)
+    )
+    monkeypatch.setattr("reference_fact_pipeline.cloudflare_api.time.sleep", sleeps.append)
+    client = CloudflareResponsesClient(request_interval_seconds=3.0)
+    client._wait_for_request_slot()
+    client._wait_for_request_slot()
+    assert sleeps == [2.0]

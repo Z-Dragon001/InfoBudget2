@@ -9,9 +9,10 @@ import re
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from threading import Lock
 from typing import Any, Iterable, Mapping
 
 from infobudget.rl_router.api import (
@@ -28,6 +29,10 @@ CLOUDFLARE_RESPONSES_BACKENDS = {
     "cloudflare_responses",
     "cloudflare_ai_responses",
 }
+
+
+class CloudflareWholesaleRateLimitError(ModelAPIError):
+    """A persistent managed-credential 402 that should pause the whole campaign."""
 
 
 def require_reference_api_credentials(
@@ -57,6 +62,10 @@ class CloudflareResponsesClient:
     max_retries: int = 3
     retry_backoff_seconds: float = 1.0
     account_id_env: str = "CLOUDFLARE_ACCOUNT_ID"
+    request_interval_seconds: float = 0.0
+    wholesale_402_backoff_seconds: tuple[float, ...] = (60.0, 120.0, 300.0)
+    _last_request_at: float = field(default=0.0, init=False, repr=False)
+    _request_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def complete(
         self,
@@ -125,8 +134,12 @@ class CloudflareResponsesClient:
         self, url: str, data: bytes, headers: dict[str, str]
     ) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
         attempts: list[dict[str, Any]] = []
-        last_error: BaseException | None = None
-        for attempt in range(self.max_retries + 1):
+        attempt = 0
+        transport_retries = 0
+        wholesale_retries = 0
+        while True:
+            attempt += 1
+            self._wait_for_request_slot()
             request = urllib.request.Request(url, data=data, headers=headers, method="POST")
             started = time.perf_counter()
             started_at = datetime.now(timezone.utc).isoformat()
@@ -136,7 +149,7 @@ class CloudflareResponsesClient:
                     request_id = _request_id(response.headers)
                     attempts.append(
                         {
-                            "transport_attempt": attempt + 1,
+                            "transport_attempt": attempt,
                             "started_at": started_at,
                             "status": "succeeded",
                             "http_status": int(getattr(response, "status", 200)),
@@ -164,10 +177,11 @@ class CloudflareResponsesClient:
                     return parsed, attempts, request_id
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace").strip()
-                retryable = exc.code in {408, 429, 500, 502, 503, 504}
+                wholesale_limited = _is_wholesale_rate_limit(exc.code, body)
+                retryable = wholesale_limited or exc.code in {408, 429, 500, 502, 503, 504}
                 attempts.append(
                     _failed_attempt(
-                        attempt + 1,
+                        attempt,
                         started_at,
                         started,
                         http_status=int(exc.code),
@@ -176,18 +190,30 @@ class CloudflareResponsesClient:
                         error=body or str(exc),
                     )
                 )
-                if not retryable or attempt >= self.max_retries:
+                if wholesale_limited:
+                    if wholesale_retries >= len(self.wholesale_402_backoff_seconds):
+                        raise CloudflareWholesaleRateLimitError(
+                            f"Cloudflare request remained wholesale-rate-limited after "
+                            f"{len(attempts)} attempts: HTTP 402: {body[:500]}",
+                            attempts=attempts,
+                            retryable=True,
+                        ) from exc
+                    delay = self.wholesale_402_backoff_seconds[wholesale_retries]
+                    wholesale_retries += 1
+                    self._sleep(attempt - 1, exc.headers, explicit_delay=delay)
+                    continue
+                if not retryable or transport_retries >= self.max_retries:
                     raise ModelAPIError(
                         f"Cloudflare request failed: HTTP {exc.code}: {body[:500]}",
                         attempts=attempts,
                         retryable=retryable,
                     ) from exc
-                last_error = exc
-                self._sleep(attempt, exc.headers)
+                transport_retries += 1
+                self._sleep(transport_retries - 1, exc.headers)
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 attempts.append(
                     _failed_attempt(
-                        attempt + 1,
+                        attempt,
                         started_at,
                         started,
                         http_status=None,
@@ -196,18 +222,27 @@ class CloudflareResponsesClient:
                         error=str(exc),
                     )
                 )
-                if attempt >= self.max_retries:
+                if transport_retries >= self.max_retries:
                     raise ModelAPIError(
                         f"Cloudflare request failed: {exc}", attempts=attempts
                     ) from exc
-                last_error = exc
-                self._sleep(attempt, None)
-        raise ModelAPIError(
-            f"Cloudflare request failed: {last_error}", attempts=attempts
-        )
+                transport_retries += 1
+                self._sleep(transport_retries - 1, None)
 
-    def _sleep(self, attempt: int, headers: Any) -> None:
-        delay = _retry_after_seconds(headers)
+    def _wait_for_request_slot(self) -> None:
+        with self._request_lock:
+            now = time.monotonic()
+            delay = self.request_interval_seconds - (now - self._last_request_at)
+            if self._last_request_at > 0 and delay > 0:
+                time.sleep(delay)
+            self._last_request_at = time.monotonic()
+
+    def _sleep(
+        self, attempt: int, headers: Any, *, explicit_delay: float | None = None
+    ) -> None:
+        delay = explicit_delay
+        if delay is None:
+            delay = _retry_after_seconds(headers)
         if delay is None:
             base = self.retry_backoff_seconds * (2**attempt)
             delay = base + random.uniform(0.0, max(0.0, base * 0.25))
@@ -231,7 +266,12 @@ class ReferenceAPIClient:
 
 
 def build_reference_api_client(
-    *, timeout_seconds: int, max_retries: int, retry_backoff_seconds: float
+    *,
+    timeout_seconds: int,
+    max_retries: int,
+    retry_backoff_seconds: float,
+    cloudflare_request_interval_seconds: float = 0.0,
+    cloudflare_402_backoff_seconds: tuple[float, ...] = (60.0, 120.0, 300.0),
 ) -> ReferenceAPIClient:
     options = {
         "timeout_seconds": timeout_seconds,
@@ -240,7 +280,11 @@ def build_reference_api_client(
     }
     return ReferenceAPIClient(
         chat_client=OpenAICompatibleClient(**options),
-        cloudflare_client=CloudflareResponsesClient(**options),
+        cloudflare_client=CloudflareResponsesClient(
+            **options,
+            request_interval_seconds=cloudflare_request_interval_seconds,
+            wholesale_402_backoff_seconds=cloudflare_402_backoff_seconds,
+        ),
     )
 
 
@@ -347,6 +391,10 @@ def _failed_attempt(
         "error": error[:500],
         "cost_status": "unknown",
     }
+
+
+def _is_wholesale_rate_limit(status: int, body: str) -> bool:
+    return status == 402 and "wholesale rate limit exceeded" in body.casefold()
 
 
 def _retry_after_seconds(headers: Any) -> float | None:

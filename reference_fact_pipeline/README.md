@@ -28,6 +28,8 @@ JUDGE_MODEL_API_KEY=固定Grounding Judge的API Key
 
 `gold_fact_extractor.api_base_url` 使用 `{account_id}` 占位符，客户端只在运行时从 `CLOUDFLARE_ACCOUNT_ID` 替换，不会把账户信息写进配置或产物。Cloudflare 模型目录没有公开当前账户的实际价格快照，因此项目没有伪造 `prices.yaml` 条目：token 会正常记录，但相关阶段写入 `cost_status=unknown_missing_price_snapshot`，manifest 标记 `cost_complete=false`。从 Cloudflare Dashboard 获得实际价格后，可在 `configs/prices.yaml` 为 `openai/gpt-5.6-luna` 增加价格快照，费用将自动恢复为完整统计。
 
+Gold 专用 Cloudflare 客户端默认在每次 HTTP 请求前保持至少 3 秒间隔。只有当 HTTP 402 响应正文明确包含 `Wholesale rate limit exceeded` 时，才按 60、120、300 秒依次长退避并自动重试当前请求；普通的付款类 402 不会被误当成限流。三次退避后仍持续受限时，CLI 进入 300 秒熔断等待并自动重试同一个主题段，默认最多自动恢复两轮；恢复成功后继续后续未完成段。两轮后仍受限才暂停本次 campaign，不再让后续上千段快速失败。manifest 会记录 `circuit_pause_count`、`run_paused`、`pause_reason` 和 `remaining_segment_count`。之后使用相同 `--run-id --resume`，成功段会被跳过，失败段和未尝试段会继续处理。
+
 ## 构建冻结参考 Fact
 
 LoCoMo 示例：

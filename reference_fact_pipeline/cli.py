@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from typing import Any
 from infobudget.config import load_project_bundle
 from infobudget.rl_router.api import ModelAPIError
 from reference_fact_pipeline.cloudflare_api import (
+    CloudflareWholesaleRateLimitError,
     build_reference_api_client,
     require_reference_api_credentials,
 )
@@ -71,6 +73,8 @@ def main() -> None:
         timeout_seconds=config.timeout_seconds,
         max_retries=config.max_retries,
         retry_backoff_seconds=config.retry_backoff_seconds,
+        cloudflare_request_interval_seconds=config.cloudflare_request_interval_seconds,
+        cloudflare_402_backoff_seconds=config.cloudflare_402_backoff_seconds,
     )
     pipeline = ReferenceFactPipeline(
         config=config,
@@ -114,7 +118,12 @@ def main() -> None:
     skipped = 0
     built = 0
     failed = 0
-    for segment in segments:
+    run_paused = False
+    pause_reason = ""
+    remaining_segment_count = 0
+    circuit_pause_count = 0
+    consecutive_auto_resumes = 0
+    for segment_index, segment in enumerate(segments):
         key = (run_id, segment.segment_id, segment.source_content_hash, pipeline.effective_config_hash)
         if key in completed:
             if not args.resume:
@@ -133,42 +142,61 @@ def main() -> None:
                 )
             skipped += 1
             continue
-        try:
-            result = pipeline.process_segment(segment, run_id=run_id)
-            if not ledger.append(result.to_dict()):
-                raise RuntimeError(f"concurrent duplicate reference result: {segment.segment_id}")
-            built += 1
-            previous_failure = existing_failures.get(key)
-            if previous_failure is not None:
-                failure_ledger.upsert(
-                    {
+        while True:
+            try:
+                result = pipeline.process_segment(segment, run_id=run_id)
+                if not ledger.append(result.to_dict()):
+                    raise RuntimeError(
+                        f"concurrent duplicate reference result: {segment.segment_id}"
+                    )
+                built += 1
+                previous_failure = existing_failures.get(key)
+                if previous_failure is not None:
+                    resolved = {
                         **previous_failure,
                         "status": "resolved",
                         "resolved_at": datetime.now(timezone.utc).isoformat(),
                     }
-                )
-        except (ModelAPIError, ValueError) as error:
-            failed += 1
-            previous_failure = existing_failures.get(key, {})
-            failure_row = {
-                "schema_version": "reference_fact_failure_v1",
-                "run_id": run_id,
-                "dataset": segment.dataset_name,
-                "split": segment.split,
-                "sample_id": segment.sample_id,
-                "segment_id": segment.segment_id,
-                "source_content_hash": segment.source_content_hash,
-                "config_hash": pipeline.effective_config_hash,
-                "status": "failed",
-                "attempt_count": int(previous_failure.get("attempt_count", 0)) + 1,
-                "failed_at": datetime.now(timezone.utc).isoformat(),
-                "error_type": type(error).__name__,
-                "error": str(error)[:4000],
-                "transport_attempts": getattr(error, "attempts", None) or [],
-            }
-            failure_ledger.upsert(failure_row)
-            existing_failures[key] = failure_row
-            continue
+                    failure_ledger.upsert(resolved)
+                    existing_failures[key] = resolved
+                consecutive_auto_resumes = 0
+                break
+            except (ModelAPIError, ValueError) as error:
+                previous_failure = existing_failures.get(key, {})
+                failure_row = {
+                    "schema_version": "reference_fact_failure_v1",
+                    "run_id": run_id,
+                    "dataset": segment.dataset_name,
+                    "split": segment.split,
+                    "sample_id": segment.sample_id,
+                    "segment_id": segment.segment_id,
+                    "source_content_hash": segment.source_content_hash,
+                    "config_hash": pipeline.effective_config_hash,
+                    "status": "failed",
+                    "attempt_count": int(previous_failure.get("attempt_count", 0)) + 1,
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                    "error_type": type(error).__name__,
+                    "error": str(error)[:4000],
+                    "transport_attempts": getattr(error, "attempts", None) or [],
+                }
+                failure_ledger.upsert(failure_row)
+                existing_failures[key] = failure_row
+                if isinstance(error, CloudflareWholesaleRateLimitError):
+                    if consecutive_auto_resumes < config.cloudflare_max_auto_resumes:
+                        consecutive_auto_resumes += 1
+                        circuit_pause_count += 1
+                        time.sleep(config.cloudflare_circuit_pause_seconds)
+                        continue
+                    failed += 1
+                    run_paused = True
+                    pause_reason = "persistent_cloudflare_wholesale_rate_limit"
+                    remaining_segment_count = len(segments) - segment_index - 1
+                    break
+                failed += 1
+                consecutive_auto_resumes = 0
+                break
+        if run_paused:
+            break
 
     requested_segment_ids = {item.segment_id for item in segments}
     selected_rows = [
@@ -197,6 +225,10 @@ def main() -> None:
         skipped=skipped,
         failed=failed,
         failure_rows=selected_failure_rows,
+        run_paused=run_paused,
+        pause_reason=pause_reason,
+        remaining_segment_count=remaining_segment_count,
+        circuit_pause_count=circuit_pause_count,
         model_roles={role: bundle.models[role].effective_model_name for role in sorted(roles)},
     )
     atomic_write_json(args.output_dir / "manifest.json", manifest)
@@ -216,6 +248,10 @@ def _manifest(
     model_roles: dict[str, str],
     failed: int = 0,
     failure_rows: list[dict[str, Any]] | None = None,
+    run_paused: bool = False,
+    pause_reason: str = "",
+    remaining_segment_count: int = 0,
+    circuit_pause_count: int = 0,
 ) -> dict[str, Any]:
     failures = failure_rows or []
     total_input_tokens = sum(int(row.get("total_input_tokens", 0)) for row in rows)
@@ -270,7 +306,11 @@ def _manifest(
         "failed_this_invocation": failed,
         "unresolved_failure_count": len(failures),
         "failed_segment_ids": sorted(str(row.get("segment_id")) for row in failures),
-        "run_complete": len(failures) == 0,
+        "run_paused": run_paused,
+        "pause_reason": pause_reason,
+        "remaining_segment_count": remaining_segment_count,
+        "circuit_pause_count": circuit_pause_count,
+        "run_complete": len(failures) == 0 and not run_paused,
         "model_roles": model_roles,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }

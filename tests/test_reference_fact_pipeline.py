@@ -12,6 +12,7 @@ from infobudget.rl_router.schemas import TopicSegment
 from infobudget.schemas import ModelSpec, PriceSpec
 from reference_fact_pipeline.cli import _manifest
 from reference_fact_pipeline.cli import main as reference_cli_main
+from reference_fact_pipeline.cloudflare_api import CloudflareWholesaleRateLimitError
 from reference_fact_pipeline.config import ReferencePipelineConfig
 from reference_fact_pipeline.metrics import metrics_from_counts, score_fact_sets
 from reference_fact_pipeline.pipeline import ReferenceFactPipeline
@@ -50,6 +51,10 @@ def _config(max_reference_facts: int = 15) -> ReferencePipelineConfig:
         timeout_seconds=30,
         max_retries=0,
         retry_backoff_seconds=0.0,
+        cloudflare_request_interval_seconds=0.0,
+        cloudflare_402_backoff_seconds=(0.0,),
+        cloudflare_circuit_pause_seconds=0.0,
+        cloudflare_max_auto_resumes=0,
         fact_type_priority=("state", "event", "other"),
     )
 
@@ -400,3 +405,134 @@ def test_cli_records_bad_segment_and_continues(
         for line in (output / "reference_facts.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert [row["segment_id"] for row in rows] == ["sample-1:seg-2"]
+
+
+def test_cli_pauses_campaign_after_persistent_wholesale_402(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    first = _segment()
+    segments = [
+        replace(
+            first,
+            segment_id=f"sample-1:seg-{index}",
+            source_content_hash=f"source-hash-{index}",
+            segment_order=index,
+        )
+        for index in range(1, 4)
+    ]
+    source = tmp_path / "segments.jsonl"
+    source.write_text(
+        "\n".join(json.dumps(asdict(item)) for item in segments) + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output"
+
+    class LimitedClient:
+        calls = 0
+
+        def complete(self, **_kwargs):
+            self.calls += 1
+            raise CloudflareWholesaleRateLimitError(
+                "persistent wholesale limit",
+                attempts=[{"http_status": 402}],
+            )
+
+    client = LimitedClient()
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "account123")
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "token")
+    monkeypatch.setenv("JUDGE_MODEL_API_KEY", "judge-token")
+    monkeypatch.setattr(
+        "reference_fact_pipeline.cli.build_reference_api_client", lambda **_kwargs: client
+    )
+    sleeps = []
+    monkeypatch.setattr("reference_fact_pipeline.cli.time.sleep", sleeps.append)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reference-fact-cli",
+            "--dataset",
+            "locomo",
+            "--segments",
+            str(source),
+            "--project-config-dir",
+            "configs",
+            "--output-dir",
+            str(output),
+            "--run-id",
+            "circuit-breaker",
+        ],
+    )
+    reference_cli_main()
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert client.calls == 3
+    assert sleeps == [300.0, 300.0]
+    assert manifest["run_paused"] is True
+    assert manifest["pause_reason"] == "persistent_cloudflare_wholesale_rate_limit"
+    assert manifest["remaining_segment_count"] == 2
+    assert manifest["circuit_pause_count"] == 2
+    assert manifest["unresolved_failure_count"] == 1
+    assert manifest["run_complete"] is False
+
+
+def test_cli_auto_resumes_same_segment_after_circuit_pause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "segments.jsonl"
+    source.write_text(json.dumps(asdict(_segment())) + "\n", encoding="utf-8")
+    output = tmp_path / "output"
+
+    class RecoveringClient:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise CloudflareWholesaleRateLimitError(
+                    "temporary wholesale limit",
+                    attempts=[{"http_status": 402}],
+                )
+            payload = {"facts": []} if self.calls == 2 else {"missing_facts": []}
+            return LLMResponse(
+                content=json.dumps(payload),
+                input_tokens=10,
+                output_tokens=2,
+                latency_ms=1,
+            )
+
+    client = RecoveringClient()
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "account123")
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "token")
+    monkeypatch.setenv("JUDGE_MODEL_API_KEY", "judge-token")
+    monkeypatch.setattr(
+        "reference_fact_pipeline.cli.build_reference_api_client", lambda **_kwargs: client
+    )
+    sleeps = []
+    monkeypatch.setattr("reference_fact_pipeline.cli.time.sleep", sleeps.append)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reference-fact-cli",
+            "--dataset",
+            "locomo",
+            "--segments",
+            str(source),
+            "--project-config-dir",
+            "configs",
+            "--output-dir",
+            str(output),
+            "--run-id",
+            "auto-resume",
+        ],
+    )
+    reference_cli_main()
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert client.calls == 3
+    assert sleeps == [300.0]
+    assert manifest["circuit_pause_count"] == 1
+    assert manifest["failed_this_invocation"] == 0
+    assert manifest["unresolved_failure_count"] == 0
+    assert manifest["run_paused"] is False
+    assert manifest["run_complete"] is True

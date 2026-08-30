@@ -21,6 +21,13 @@ api:
   timeout_seconds: 120
   max_retries: 3
   retry_backoff_seconds: 1.0
+  # Applied only to Gold extraction requests sent to Cloudflare Responses.
+  cloudflare_request_interval_seconds: 3.0
+  # Applied only to HTTP 402 responses containing "Wholesale rate limit exceeded".
+  cloudflare_402_backoff_seconds: [60, 120, 300]
+  # After all request-level 402 retries fail, pause and retry the same segment.
+  cloudflare_circuit_pause_seconds: 300
+  cloudflare_max_auto_resumes: 2
 
 ranking:
   # Used only if more than K grounded Facts remain. Source order breaks ties.
