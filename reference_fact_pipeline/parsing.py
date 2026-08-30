@@ -9,8 +9,9 @@ from typing import Any
 from reference_fact_pipeline.schemas import GroundingDecision, ProposedFact
 
 VALID_FACT_TYPES = {
-    "identity", "state", "event", "preference", "goal", "relationship",
-    "knowledge", "assistant_answer", "other",
+    "identity", "relationship", "event", "state", "plan", "goal",
+    "preference", "decision", "constraint", "health", "knowledge",
+    "assistant_answer", "negative", "other",
 }
 VALID_STATE_STATUS = {"current", "historical", "timeless", "unspecified"}
 
@@ -115,4 +116,3 @@ def _json_object(content: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("model response root must be a JSON object")
     return value
-

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -8,20 +10,23 @@ import pytest
 from infobudget.rl_router.api import LLMResponse
 from infobudget.rl_router.schemas import TopicSegment
 from infobudget.schemas import ModelSpec, PriceSpec
+from reference_fact_pipeline.cli import _manifest
+from reference_fact_pipeline.cli import main as reference_cli_main
 from reference_fact_pipeline.config import ReferencePipelineConfig
 from reference_fact_pipeline.metrics import metrics_from_counts, score_fact_sets
 from reference_fact_pipeline.pipeline import ReferenceFactPipeline
 
 
 class QueueClient:
-    def __init__(self, contents: list[dict[str, object]]):
+    def __init__(self, contents: list[dict[str, object] | str]):
         self.contents = list(contents)
         self.prompts: list[str] = []
 
     def complete(self, *, model_spec, prompt, max_new_tokens, json_mode):
         self.prompts.append(prompt)
+        value = self.contents.pop(0)
         return LLMResponse(
-            content=json.dumps(self.contents.pop(0)),
+            content=value if isinstance(value, str) else json.dumps(value),
             input_tokens=100,
             output_tokens=20,
             latency_ms=5,
@@ -183,8 +188,35 @@ def test_pipeline_builds_stable_frozen_facts_and_annotates_source_ids(tmp_path: 
     assert result.frozen_fact_count == 2
     assert len(result.reference_facts[0].reference_fact_id) == 23
     assert result.reference_set_hash
-    assert result.to_dict()["total_cost"] > 0
-    assert "<SOURCE_TURN_ID=1> [2023-01-01T00:00:00, Sun] 0.A" in client.prompts[0]
+    serialized = result.to_dict()
+    assert serialized["total_input_tokens"] == 400
+    assert serialized["total_output_tokens"] == 80
+    assert serialized["total_tokens"] == 480
+    assert serialized["provider_usage_stage_count"] == 4
+    assert serialized["estimated_usage_stage_count"] == 0
+    assert serialized["total_cost"] > 0
+    manifest = _manifest(
+        run_id="test-run",
+        config_hash=result.config_hash,
+        dataset="locomo",
+        source=tmp_path / "segments.jsonl",
+        output=tmp_path / "reference_facts.jsonl",
+        rows=[serialized],
+        built=1,
+        skipped=0,
+        model_roles={"reference": "reference-model", "judge": "judge-model"},
+    )
+    assert manifest["total_input_tokens"] == 400
+    assert manifest["total_output_tokens"] == 80
+    assert manifest["total_tokens"] == 480
+    assert manifest["token_usage_by_role"]["reference"]["api_calls"] == 2
+    assert manifest["token_usage_by_role"]["judge"]["api_calls"] == 2
+    assert "<SOURCE_TURN_ID=1> [2023-01-01T00:00:00, Sun] A:" in client.prompts[0]
+    assert "] 0.A:" not in client.prompts[0]
+    assert "<SOURCE_TURN_ID=2> [2023-01-01T00:00:01, Sun] B:" in client.prompts[0]
+    assert "Health and wellbeing facts when explicitly stated" in client.prompts[0]
+    assert "processed_segment_ids" not in client.prompts[0]
+    assert "{shared_fact_policy}" not in client.prompts[0]
     assert (tmp_path / "raw").is_dir()
 
 
@@ -247,3 +279,124 @@ def test_source_annotation_preserves_multiline_turns(tmp_path: Path):
     pipeline.process_segment(segment, run_id="multiline")
     assert "Second paragraph" in client.prompts[0]
     assert "<SOURCE_TURN_ID=2> [2023-01-01T00:00:01" in client.prompts[0]
+    assert "] 1.assistant:" not in client.prompts[0]
+
+
+def test_pipeline_repairs_one_malformed_json_response(tmp_path: Path):
+    client = QueueClient(
+        [
+            "not valid JSON",
+            {
+                "segment_id": "sample-1:seg-1",
+                "facts": [
+                    {
+                        "fact_text": "A moved to Paris",
+                        "source_turn_ids": [1],
+                        "fact_type": "state",
+                        "state_status": "current",
+                    }
+                ],
+            },
+            {
+                "decisions": [
+                    {
+                        "temp_fact_id": "initial_0000",
+                        "decision": "ACCEPT",
+                        "entailed": True,
+                        "atomic": True,
+                        "source_ids_sufficient": True,
+                        "contains_external_inference": False,
+                        "duplicate_of": None,
+                        "reason": "directly stated",
+                    }
+                ]
+            },
+            {"missing_facts": []},
+        ]
+    )
+    models = {
+        "reference": _model("reference-model"),
+        "judge": _model("judge-model"),
+        "small": _model("candidate-small"),
+        "medium": _model("candidate-medium"),
+        "large": _model("candidate-large"),
+    }
+    pipeline = ReferenceFactPipeline(
+        config=_config(),
+        models=models,
+        prices={},
+        client=client,
+        prompt_dir=Path("reference_fact_pipeline/prompts"),
+        raw_archive_dir=tmp_path / "raw",
+    )
+    result = pipeline.process_segment(_segment(), run_id="repair-run")
+    assert result.frozen_fact_count == 1
+    assert [item.stage for item in result.stage_usage] == [
+        "initial_extraction",
+        "initial_extraction_json_repair",
+        "initial_grounding",
+        "coverage_extraction",
+    ]
+    assert "deterministic JSON structure repair tool" in client.prompts[1]
+    assert len(list((tmp_path / "raw").rglob("*.json"))) == 4
+
+
+def test_cli_records_bad_segment_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    first = _segment()
+    second = replace(
+        first,
+        segment_id="sample-1:seg-2",
+        source_content_hash="source-hash-2",
+        segment_order=2,
+    )
+    source = tmp_path / "segments.jsonl"
+    source.write_text(
+        "\n".join(json.dumps(asdict(item)) for item in (first, second)) + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output"
+    client = QueueClient(
+        [
+            "invalid initial output",
+            "invalid repair output",
+            {"facts": []},
+            {"missing_facts": []},
+        ]
+    )
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "account123")
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "token")
+    monkeypatch.setenv("JUDGE_MODEL_API_KEY", "judge-token")
+    monkeypatch.setattr(
+        "reference_fact_pipeline.cli.build_reference_api_client", lambda **_kwargs: client
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reference-fact-cli",
+            "--dataset",
+            "locomo",
+            "--segments",
+            str(source),
+            "--project-config-dir",
+            "configs",
+            "--output-dir",
+            str(output),
+            "--run-id",
+            "failure-isolation",
+        ],
+    )
+    reference_cli_main()
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["built_this_invocation"] == 1
+    assert manifest["failed_this_invocation"] == 1
+    assert manifest["unresolved_failure_count"] == 1
+    assert manifest["failed_segment_ids"] == ["sample-1:seg-1"]
+    assert manifest["run_complete"] is False
+    rows = [
+        json.loads(line)
+        for line in (output / "reference_facts.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["segment_id"] for row in rows] == ["sample-1:seg-2"]

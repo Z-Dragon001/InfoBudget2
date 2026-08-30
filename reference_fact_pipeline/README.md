@@ -6,13 +6,27 @@
 
 每个主题段依次经过：
 
-1. 非候选模型的高召回初始提取；
+1. 非候选模型使用与小/中/大候选提取器相同的语义 Fact Policy，进行高召回初始提取；
 2. 固定 Grounding Judge 逐条检查蕴含性、原子性、来源充分性、外部推断和重复；
 3. 仅根据“原主题段 + 已接受参考 Fact”进行一次覆盖补全；
 4. 新 Fact 再次经过同一个 Grounding Judge；
 5. 确定性去重和排序，最多冻结 K 条（默认 K=15，与候选 Fact 上限一致）。
 
-参考提取器看不到候选 Fact、问题、Gold answer、QA 正误或下游路由结果，避免参考标签向任一候选模型或任务问题泄漏。默认模型角色来自项目的 `configs/models.yaml`：提取使用 `qa_reader`，Grounding 使用 `judge_llm`；程序会验证这些角色的实际模型不等于 `small/medium/large` 的候选模型。若论文实验改用更强参考模型，只需在项目模型配置中增加/修改角色，然后编辑本目录的 `config.yaml`。
+模型输入只暴露一基的规范 `SOURCE_TURN_ID`。分段文件 `text` 中原有的零基编号仅用于加载时验证 `legacy_source_id + 1 == SOURCE_TURN_ID`，渲染提示词时会被移除，避免同一行出现两套编号。模型响应若不是合法 JSON，流水线会先归档原始响应，再执行一次只修复 JSON 结构、不新增或改写 Fact 的修复请求。
+
+参考提取器看不到候选 Fact、问题、Gold answer、QA 正误或下游路由结果，避免参考标签向任一候选模型或任务问题泄漏。参考流水线会直接读取 `configs/prompts/locomo_memory_extraction.txt` 或 `longmemeval_memory_extraction.txt` 中从 `Mandatory processing procedure` 到 `Output contract` 之前的完整语义规则，并注入初始提取、覆盖补全和 Grounding 三类提示词。由此 Gold 与候选共享 Fact 范围、粒度、时间更新、证据规则和15条最终优先级，而不共享候选的输出格式和路由元数据。该共享 Policy 也进入有效配置哈希，修改候选语义提示词后旧 Gold 结果不会被断点续跑误用。
+
+默认模型角色来自项目的 `configs/models.yaml`：初始提取和覆盖补全使用 Cloudflare 上的 `gold_fact_extractor=openai/gpt-5.6-luna`，Grounding 使用 `judge_llm`。后端路由会让 Gold 提取走 `/ai/v1/responses`，同时让 Judge 继续走 `/chat/completions`。程序会验证这些角色的实际模型不等于 `small/medium/large` 的候选模型。
+
+Cloudflare 调用前需要在项目 `.env` 中配置：
+
+```dotenv
+CLOUDFLARE_ACCOUNT_ID=你的Cloudflare账户ID
+CLOUDFLARE_API_TOKEN=具有Workers AI权限的Token
+JUDGE_MODEL_API_KEY=固定Grounding Judge的API Key
+```
+
+`gold_fact_extractor.api_base_url` 使用 `{account_id}` 占位符，客户端只在运行时从 `CLOUDFLARE_ACCOUNT_ID` 替换，不会把账户信息写进配置或产物。Cloudflare 模型目录没有公开当前账户的实际价格快照，因此项目没有伪造 `prices.yaml` 条目：token 会正常记录，但相关阶段写入 `cost_status=unknown_missing_price_snapshot`，manifest 标记 `cost_complete=false`。从 Cloudflare Dashboard 获得实际价格后，可在 `configs/prices.yaml` 为 `openai/gpt-5.6-luna` 增加价格快照，费用将自动恢复为完整统计。
 
 ## 构建冻结参考 Fact
 
@@ -30,14 +44,18 @@ LoCoMo 示例：
 
 LongMemEval 只需把 `--dataset` 和 `--segments` 改成对应数据集。小规模连通性验证可添加 `--limit 2`；中断后使用相同 `--run-id --resume`，SQLite ledger 会跳过已完成且内容哈希、配置哈希一致的主题段。
 
-需要的 API key 仍从项目 `.env` 读取。默认角色对应 `QA_READER_API_KEY` 和 `JUDGE_MODEL_API_KEY`。
+需要的 API key 仍从项目 `.env` 读取。默认角色对应 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN` 和 `JUDGE_MODEL_API_KEY`。
 
 输出目录包括：
 
 - `reference_facts.jsonl`：冻结参考集合，兼容现有质量标签脚本；
 - `reference_facts.sqlite3`：幂等、可恢复的逐主题段 ledger；
 - `raw_responses/<run-id>/`：每阶段完整 prompt、模型原始响应、token 与重试审计；
-- `manifest.json`：数据集、模型角色、配置哈希、Fact 数量和总成本。
+- `manifest.json`：数据集、模型角色、配置哈希、Fact 数量、全运行 input/output/total token、按模型角色聚合的调用/token 数量和总成本。
+
+同一个 SQLite 文件还包含 `reference_fact_failures` 表。单个主题段在 JSON 修复后仍失败或 API 调用最终失败时，会记录异常类型、错误信息、传输尝试和尝试次数，然后继续处理后续主题段。`manifest.json` 通过 `unresolved_failure_count`、`failed_segment_ids` 和 `run_complete` 明确标记产物是否完整；使用相同 `--run-id --resume` 可重试失败段。
+
+每个主题段的 `stage_usage` 分别记录初始提取、初始 Grounding、覆盖补全和覆盖 Grounding 的 `input_tokens`、`output_tokens`、`total_tokens` 与 `usage_source`；主题段顶层和运行 manifest 还提供聚合值。Cloudflare 返回官方 usage 时标记为 `provider`，缺失时使用本地 tokenizer 估算并计入 `estimated_usage_stage_count`，不会把估算值伪装成供应商计费值。
 
 每条冻结 Fact 保留 `reference_fact_id`、文本、`source_turn_ids`、类型、时态状态、初始/补全来源、Grounding 理由和选择次序。Fact ID 由主题段 ID、规范化文本与证据 ID 生成；集合哈希由最终冻结列表生成，因此相同输入与相同被接受内容可跨运行稳定比较。
 

@@ -12,15 +12,21 @@ from infobudget.rl_router.config import load_rl_bundle, scan_config_secrets
 from infobudget.schemas import ModelSpec
 
 
-def test_five_api_roles_have_prices_and_environment_keys() -> None:
+def test_api_roles_have_credentials_and_known_price_scopes() -> None:
     bundle = load_project_bundle("configs")
-    roles = {"small", "medium", "large", "qa_reader", "judge_llm"}
+    priced_roles = {"small", "medium", "large", "qa_reader", "judge_llm"}
+    roles = {*priced_roles, "gold_fact_extractor"}
     assert roles == bundle.models.keys()
     for role in roles:
         spec = bundle.models[role]
         assert spec.deploy == "api"
         assert spec.api_key_env
-        assert spec.model_name in bundle.prices
+        if role in priced_roles:
+            assert spec.model_name in bundle.prices
+    gold = bundle.models["gold_fact_extractor"]
+    assert gold.backend == "cloudflare_responses"
+    assert "{account_id}" in gold.api_base_url
+    assert gold.model_name not in bundle.prices
     assert not scan_config_secrets("configs")
     rl_bundle = load_rl_bundle("configs")
     assert rl_bundle.rl["extraction"]["max_facts_per_segment"] == 15

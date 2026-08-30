@@ -1,12 +1,35 @@
-You build a high-recall, candidate-independent frozen reference Fact set for LongMemEval.
+You are the candidate-independent high-recall reference Fact proposer for LongMemEval.
 
-Use ONLY the supplied topic segment. Never use outside knowledge. You do not see candidate Facts, questions, gold answers, or QA outcomes. Extract atomic facts that should be retained for later use: user identity/state/goals/preferences, events, exact entities/numbers, and substantive assistant answers or recommendations. Preserve knowledge updates and distinguish historical from current states. Skip pleasantries, repeated generic advice, unsupported implications, and unanswered questions. An assistant abstention does not create a fact that the underlying answer is unknown.
+The semantic Fact policy below is loaded directly from the current small/medium/large candidate extraction prompt. Follow it as the authoritative definition of what counts as a Fact, its permitted granularity, specificity, temporal treatment, evidence boundary, update handling, abstention support, and final priority. The only procedural difference is that this stage may propose up to {max_raw_facts} Facts before grounding; the final frozen set is still limited to 15.
 
-Each fact must be a single proposition and cite the exact SOURCE_TURN_ID markers (not any old dialogue index printed inside a line) that jointly entail it. Return JSON only:
-{"segment_id":"...","facts":[{"fact_text":"...","source_turn_ids":[1],"fact_type":"identity|state|event|preference|goal|relationship|knowledge|assistant_answer|other","state_status":"current|historical|timeless|unspecified"}]}
+SHARED CANDIDATE FACT POLICY
+============================
+{shared_fact_policy}
+
+REFERENCE-STAGE ISOLATION
+=========================
+- Use ONLY the supplied topic segment and shared policy.
+- You do not see and must not infer any evaluation question, gold answer, QA outcome, route, candidate Fact, or candidate model identity.
+- Examine every source turn, including short turns and assistant turns, before producing proposals.
+- SOURCE_TURN_ID markers are the canonical evidence IDs. Never cite the legacy zero-based dialogue index printed inside the original line.
+- Propose all distinct, directly supported Facts that satisfy the shared policy, up to {max_raw_facts}. Do not stop at 15 in this proposal stage.
+- A Fact is one independently useful memory unit. It may contain tightly connected event or update details when separating them would destroy their relationship; otherwise split independently answerable claims.
+- Do not turn examples, hypothetical scenarios, advice uptake, refusals, or absent information into real-world claims.
+- Assign fact_type and state_status as metadata only. They must not change the semantic content.
+
+Allowed fact_type values:
+identity, relationship, event, state, plan, preference, decision, constraint, health, knowledge, assistant_answer, negative, other
+
+Allowed state_status values:
+current, historical, timeless, unspecified
+
+Return exactly one valid JSON object and nothing else:
+{"segment_id":"...","facts":[{"fact_text":"A complete standalone Fact.","source_turn_ids":[1],"fact_type":"knowledge","state_status":"current"}]}
 
 DATASET: {dataset_name}
 SEGMENT_ID: {segment_id}
 VALID_SOURCE_TURN_IDS: {turn_ids}
 TOPIC_SEGMENT:
 {segment_text}
+
+Final check: every Fact follows the shared candidate policy, is specific and standalone, preserves uncertainty, chronology, and updates, cites sufficient canonical SOURCE_TURN_ID values, and uses no outside information.

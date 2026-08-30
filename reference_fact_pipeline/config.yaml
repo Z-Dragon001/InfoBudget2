@@ -1,10 +1,10 @@
 schema_version: "frozen_reference_fact_v1"
-prompt_version: "reference_fact_prompt_v1"
+prompt_version: "reference_fact_prompt_v3_canonical_ids_json_repair"
 
 models:
   # These roles are resolved from configs/models.yaml.
-  reference_extractor_role: "qa_reader"
-  coverage_extractor_role: "qa_reader"
+  reference_extractor_role: "gold_fact_extractor"
+  coverage_extractor_role: "gold_fact_extractor"
   grounding_judge_role: "judge_llm"
   candidate_roles: ["small", "medium", "large"]
   require_non_candidate_reference_model: true
@@ -27,11 +27,15 @@ ranking:
   fact_type_priority:
     - state
     - event
-    - identity
-    - goal
-    - preference
-    - relationship
     - knowledge
+    - relationship
+    - plan
+    - decision
+    - constraint
+    - identity
+    - preference
+    - goal
+    - health
+    - negative
     - assistant_answer
     - other
-

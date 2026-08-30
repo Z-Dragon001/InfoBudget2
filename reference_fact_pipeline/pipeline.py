@@ -36,6 +36,7 @@ class ReferenceFactPipeline:
         prices: dict[str, PriceSpec],
         client: ChatCompletionClient,
         prompt_dir: str | Path,
+        candidate_prompt_dir: str | Path = "configs/prompts",
         raw_archive_dir: str | Path | None = None,
     ):
         self.config = config
@@ -43,6 +44,7 @@ class ReferenceFactPipeline:
         self.prices = prices
         self.client = client
         self.prompt_dir = Path(prompt_dir)
+        self.candidate_prompt_dir = Path(candidate_prompt_dir)
         self.raw_archive_dir = Path(raw_archive_dir) if raw_archive_dir else None
         self._prompts = {
             name: (self.prompt_dir / filename).read_text(encoding="utf-8")
@@ -51,8 +53,22 @@ class ReferenceFactPipeline:
                 "longmemeval": "longmemeval_extract.txt",
                 "coverage": "coverage.txt",
                 "grounding": "grounding.txt",
+                "json_repair": "json_repair.txt",
             }.items()
         }
+        self._fact_policies = {
+            dataset: _shared_fact_policy(
+                self.candidate_prompt_dir / filename,
+                max_raw_facts=self.config.max_raw_facts,
+            )
+            for dataset, filename in {
+                "locomo": "locomo_memory_extraction.txt",
+                "longmemeval": "longmemeval_memory_extraction.txt",
+            }.items()
+        }
+        self.effective_config_hash = _effective_config_hash(
+            self.config.canonical_hash(), self._prompts, self._fact_policies
+        )
         self._validate_models()
 
     def process_segment(self, segment: TopicSegment, *, run_id: str) -> FrozenReferenceSet:
@@ -65,6 +81,8 @@ class ReferenceFactPipeline:
         extraction_prompt = self._render(
             self._prompts[dataset],
             segment=segment,
+            shared_fact_policy=self._fact_policies[dataset],
+            max_raw_facts=str(self.config.max_raw_facts),
         )
         extraction_response, extraction_usage = self._complete(
             stage="initial_extraction",
@@ -73,13 +91,33 @@ class ReferenceFactPipeline:
             max_new_tokens=self.config.extraction_max_new_tokens,
         )
         usage.append(extraction_usage)
-        initial = parse_proposed_facts(
-            extraction_response.content,
-            segment_turn_ids=turn_ids,
-            origin="initial",
-            max_facts=self.config.max_raw_facts,
-        )
         self._archive(segment, run_id, "initial_extraction", extraction_prompt, extraction_response)
+        try:
+            initial = parse_proposed_facts(
+                extraction_response.content,
+                segment_turn_ids=turn_ids,
+                origin="initial",
+                max_facts=self.config.max_raw_facts,
+            )
+        except ValueError as error:
+            repaired, repair_usage = self._repair_json(
+                segment=segment,
+                run_id=run_id,
+                stage="initial_extraction_json_repair",
+                role=self.config.reference_extractor_role,
+                invalid_output=extraction_response.content,
+                validation_error=error,
+                expected_field="facts",
+                max_items=self.config.max_raw_facts,
+                max_new_tokens=self.config.extraction_max_new_tokens,
+            )
+            usage.append(repair_usage)
+            initial = parse_proposed_facts(
+                repaired.content,
+                segment_turn_ids=turn_ids,
+                origin="initial",
+                max_facts=self.config.max_raw_facts,
+            )
 
         accepted_initial, rejected_initial, grounding_usage = self._ground(
             segment,
@@ -98,6 +136,8 @@ class ReferenceFactPipeline:
                 ensure_ascii=False,
                 sort_keys=True,
             ),
+            shared_fact_policy=self._fact_policies[dataset],
+            max_raw_facts=str(self.config.max_raw_facts),
         )
         coverage_response, coverage_usage = self._complete(
             stage="coverage_extraction",
@@ -107,13 +147,33 @@ class ReferenceFactPipeline:
         )
         usage.append(coverage_usage)
         remaining = max(0, self.config.max_raw_facts - len(initial))
-        coverage = parse_proposed_facts(
-            coverage_response.content,
-            segment_turn_ids=turn_ids,
-            origin="coverage",
-            max_facts=remaining,
-        )
         self._archive(segment, run_id, "coverage_extraction", coverage_prompt, coverage_response)
+        try:
+            coverage = parse_proposed_facts(
+                coverage_response.content,
+                segment_turn_ids=turn_ids,
+                origin="coverage",
+                max_facts=remaining,
+            )
+        except ValueError as error:
+            repaired, repair_usage = self._repair_json(
+                segment=segment,
+                run_id=run_id,
+                stage="coverage_extraction_json_repair",
+                role=self.config.coverage_extractor_role,
+                invalid_output=coverage_response.content,
+                validation_error=error,
+                expected_field="missing_facts",
+                max_items=remaining,
+                max_new_tokens=self.config.coverage_max_new_tokens,
+            )
+            usage.append(repair_usage)
+            coverage = parse_proposed_facts(
+                repaired.content,
+                segment_turn_ids=turn_ids,
+                origin="coverage",
+                max_facts=remaining,
+            )
 
         accepted_coverage, rejected_coverage, coverage_grounding_usage = self._ground(
             segment,
@@ -162,7 +222,7 @@ class ReferenceFactPipeline:
             truncated_to_k=len(ranked) > self.config.max_reference_facts,
             run_id=run_id,
             prompt_version=self.config.prompt_version,
-            config_hash=self.config.canonical_hash(),
+            config_hash=self.effective_config_hash,
             stage_usage=usage,
         )
 
@@ -193,6 +253,8 @@ class ReferenceFactPipeline:
                 ensure_ascii=False,
                 sort_keys=True,
             ),
+            shared_fact_policy=self._fact_policies[segment.dataset_name.lower()],
+            max_raw_facts=str(self.config.max_raw_facts),
         )
         response, usage = self._complete(
             stage=stage,
@@ -201,7 +263,23 @@ class ReferenceFactPipeline:
             max_new_tokens=self.config.grounding_max_new_tokens,
         )
         self._archive(segment, run_id, stage, prompt, response)
-        decisions = parse_grounding_decisions(response.content, proposed)
+        stage_usage = [usage]
+        try:
+            decisions = parse_grounding_decisions(response.content, proposed)
+        except ValueError as error:
+            repaired, repair_usage = self._repair_json(
+                segment=segment,
+                run_id=run_id,
+                stage=f"{stage}_json_repair",
+                role=self.config.grounding_judge_role,
+                invalid_output=response.content,
+                validation_error=error,
+                expected_field="decisions",
+                max_items=len(proposed),
+                max_new_tokens=self.config.grounding_max_new_tokens,
+            )
+            stage_usage.append(repair_usage)
+            decisions = parse_grounding_decisions(repaired.content, proposed)
         accepted: list[tuple[ProposedFact, GroundingDecision]] = []
         rejected: list[dict[str, Any]] = []
         for fact in proposed:
@@ -210,7 +288,50 @@ class ReferenceFactPipeline:
                 accepted.append((fact, decision))
             else:
                 rejected.append({"fact": fact.to_dict(), "decision": asdict(decision)})
-        return accepted, rejected, [usage]
+        return accepted, rejected, stage_usage
+
+    def _repair_json(
+        self,
+        *,
+        segment: TopicSegment,
+        run_id: str,
+        stage: str,
+        role: str,
+        invalid_output: str,
+        validation_error: Exception,
+        expected_field: str,
+        max_items: int,
+        max_new_tokens: int,
+    ) -> tuple[LLMResponse, StageUsage]:
+        prompt = self._prompts["json_repair"]
+        replacements = {
+            "segment_id": segment.segment_id,
+            "valid_source_turn_ids": json.dumps(list(segment.turn_ids)),
+            "expected_field": expected_field,
+            "required_schema": json.dumps(
+                _repair_schema(
+                    segment.segment_id,
+                    expected_field,
+                    segment.turn_ids[0],
+                    max_items,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            "max_items": str(max_items),
+            "validation_error": str(validation_error)[:2000],
+            "invalid_output": invalid_output,
+        }
+        for name, value in replacements.items():
+            prompt = prompt.replace("{" + name + "}", value)
+        response, usage = self._complete(
+            stage=stage,
+            role=role,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+        )
+        self._archive(segment, run_id, stage, prompt, response)
+        return response, usage
 
     def _complete(
         self, *, stage: str, role: str, prompt: str, max_new_tokens: int
@@ -223,8 +344,16 @@ class ReferenceFactPipeline:
             json_mode=True,
         )
         price = self.prices.get(model.model_name) or self.prices.get(model.effective_model_name)
-        if price is None:
-            raise ValueError(f"missing price for reference model: {model.model_name}")
+        input_cost = (
+            response.input_tokens * price.official_price_in_per_1m / 1_000_000
+            if price is not None
+            else 0.0
+        )
+        output_cost = (
+            response.output_tokens * price.official_price_out_per_1m / 1_000_000
+            if price is not None
+            else 0.0
+        )
         usage = StageUsage(
             stage=stage,
             role=role,
@@ -232,13 +361,14 @@ class ReferenceFactPipeline:
             request_model=model.effective_model_name,
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
-            input_cost=response.input_tokens * price.official_price_in_per_1m / 1_000_000,
-            output_cost=response.output_tokens * price.official_price_out_per_1m / 1_000_000,
+            input_cost=input_cost,
+            output_cost=output_cost,
             usage_source=response.usage_source,
             retry_count=response.retry_count,
             latency_ms=response.latency_ms,
             provider_request_id=response.provider_request_id,
             finish_reason=response.finish_reason,
+            cost_status="known" if price is not None else "unknown_missing_price_snapshot",
         )
         return response, usage
 
@@ -364,31 +494,117 @@ def _normalize_fact(text: str) -> str:
     return " ".join(text.casefold().strip().rstrip("。.!！?").split())
 
 
+def _repair_schema(
+    segment_id: str,
+    expected_field: str,
+    example_source_turn_id: int,
+    max_items: int,
+) -> dict[str, Any]:
+    if expected_field in {"facts", "missing_facts"}:
+        item: dict[str, Any] = {
+            "fact_text": "Preserve the original Fact text",
+            "source_turn_ids": [example_source_turn_id],
+            "fact_type": "Preserve the original allowed value",
+            "state_status": "Preserve the original allowed value",
+        }
+    elif expected_field == "decisions":
+        item = {
+            "temp_fact_id": "Preserve the original proposal ID",
+            "decision": "ACCEPT|REJECT",
+            "entailed": True,
+            "atomic": True,
+            "source_ids_sufficient": True,
+            "contains_external_inference": False,
+            "duplicate_of": None,
+            "reason": "Preserve the original reason",
+        }
+    else:
+        raise ValueError(f"unsupported JSON repair field: {expected_field}")
+    return {"segment_id": segment_id, expected_field: [item] if max_items > 0 else []}
+
+
+def _shared_fact_policy(path: Path, *, max_raw_facts: int) -> str:
+    """Reuse the candidate prompt's semantic policy without its output contract."""
+    if not path.is_file():
+        raise FileNotFoundError(f"candidate Fact prompt is missing: {path}")
+    text = path.read_text(encoding="utf-8")
+    start_marker = "Mandatory processing procedure\n"
+    end_marker = "Output contract\n"
+    start = text.find(start_marker)
+    end = text.find(end_marker)
+    if start < 0 or end <= start:
+        raise ValueError(f"candidate prompt lacks policy section markers: {path}")
+    policy = text[start:end].strip()
+    policy = policy.replace(
+        "Maximum output: 15 facts per topic segment.",
+        "Final frozen output: 15 facts per topic segment. The high-recall proposal "
+        f"stage may return up to {max_raw_facts} proposals before grounding and final selection.",
+    )
+    policy = policy.replace(
+        "If a segment supports more than 15 candidate facts, retain the 15 facts",
+        "When the final grounded set supports more than 15 facts, retain the 15 facts",
+    )
+    policy = policy.replace(
+        "Do not exceed the limit. Reduce redundancy before dropping distinct information.",
+        "Apply this priority order to the proposal ordering and final deterministic selection. "
+        "Reduce redundancy before dropping distinct information.",
+    )
+    policy = policy.replace(
+        "Do not exceed the limit. Remove redundancy before dropping a distinct fact.",
+        "Apply this priority order to the proposal ordering and final deterministic selection. "
+        "Remove redundancy before dropping a distinct fact.",
+    )
+    return policy
+
+
+def _effective_config_hash(
+    config_hash: str,
+    prompts: dict[str, str],
+    policies: dict[str, str],
+) -> str:
+    payload = {
+        "config_hash": config_hash,
+        "reference_prompts": prompts,
+        "shared_candidate_policies": policies,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
 def _source_annotated_text(segment: TopicSegment) -> str:
-    """Expose canonical source IDs even when legacy text contains 0-based labels."""
+    """Render one unambiguous canonical ID and remove the legacy 0-based label."""
     # A LongMemEval turn may contain paragraphs or example dialogue. Find only
     # the expected sequential legacy header (canonical turn_id - 1), preventing
     # numbered lists/example messages inside one turn from becoming boundaries.
-    starts: list[int] = []
+    if not segment.turn_ids:
+        raise ValueError(f"segment has no source turns: {segment.segment_id}")
+    if segment.start_turn != segment.turn_ids[0] or segment.end_turn != segment.turn_ids[-1]:
+        raise ValueError(f"segment turn bounds do not match turn_ids: {segment.segment_id}")
+    headers: list[re.Match[str]] = []
     cursor = 0
     for turn_id in segment.turn_ids:
         header = re.compile(
-            rf"(?m)^\[[^\]\r\n]+\]\s+{int(turn_id) - 1}\.[^:\r\n]+:\s*"
+            rf"(?m)^\[(?P<timestamp>[^\]\r\n]+)\]\s+"
+            rf"{int(turn_id) - 1}\.(?P<speaker>[^:\r\n]+):\s*"
         )
         match = header.search(segment.text, cursor)
         if match is None:
             raise ValueError(
                 f"cannot locate source turn {turn_id} in segment text: {segment.segment_id}"
             )
-        starts.append(match.start())
+        headers.append(match)
         cursor = match.end()
-    if not starts or starts[0] != 0:
+    if headers[0].start() != 0:
         raise ValueError(f"segment text has an unrecognized prefix: {segment.segment_id}")
-    parts = [
-        segment.text[start : starts[index + 1] if index + 1 < len(starts) else len(segment.text)]
-        for index, start in enumerate(starts)
-    ]
-    return "\n".join(
-        f"<SOURCE_TURN_ID={turn_id}> {part}"
-        for turn_id, part in zip(segment.turn_ids, parts, strict=True)
-    )
+    rendered: list[str] = []
+    for index, (turn_id, header) in enumerate(
+        zip(segment.turn_ids, headers, strict=True)
+    ):
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(segment.text)
+        content = segment.text[header.end() : end].rstrip("\r\n")
+        rendered.append(
+            f"<SOURCE_TURN_ID={turn_id}> [{header.group('timestamp')}] "
+            f"{header.group('speaker').strip()}: {content}"
+        )
+    return "\n".join(rendered)

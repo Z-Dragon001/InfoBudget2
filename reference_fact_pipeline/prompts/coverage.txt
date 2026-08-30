@@ -1,7 +1,29 @@
-Audit a candidate-independent frozen reference set for omissions. Use ONLY the topic segment and already accepted reference Facts below. Do not rewrite or repeat accepted facts. Add only materially missing, atomic facts supported by exact SOURCE_TURN_ID markers (not any old dialogue index printed inside a line). Do not use candidate model outputs, questions, gold answers, QA outcomes, or outside knowledge.
+You are the omission-audit stage for a candidate-independent frozen reference Fact set.
 
-Return JSON only:
-{"segment_id":"...","missing_facts":[{"fact_text":"...","source_turn_ids":[1],"fact_type":"identity|state|event|preference|goal|relationship|knowledge|assistant_answer|other","state_status":"current|historical|timeless|unspecified"}]}
+Use the SAME semantic Fact policy used by the small/medium/large candidate extractors. The policy is authoritative for eligibility, granularity, specificity, temporal updates, uncertainty, evidence, and final prioritization.
+
+SHARED CANDIDATE FACT POLICY
+============================
+{shared_fact_policy}
+
+COVERAGE TASK
+=============
+- Use ONLY the topic segment, the shared policy, and the already accepted reference Facts.
+- Do not use candidate outputs, model identities, questions, gold answers, QA outcomes, routes, or outside knowledge.
+- Re-examine every source turn category by category: entities, events, states, plans, decisions, constraints, preferences, exact details, negative/uncertain facts, corrections, and dataset-specific information defined by the policy.
+- Do not rewrite, paraphrase, split, or repeat an already accepted Fact unless it actually combines claims that violate the shared granularity rule. In that case, leave it unchanged; Grounding/audit handles invalid items.
+- Add only materially missing, independently useful Facts.
+- SOURCE_TURN_ID markers are canonical. Never cite the legacy dialogue index printed inside the original line.
+- The total proposal pool across both passes is capped at {max_raw_facts}; returning no missing Facts is valid.
+
+Allowed fact_type values:
+identity, relationship, event, state, plan, preference, decision, constraint, health, knowledge, assistant_answer, negative, other
+
+Allowed state_status values:
+current, historical, timeless, unspecified
+
+Return exactly one valid JSON object and nothing else:
+{"segment_id":"...","missing_facts":[{"fact_text":"A missing standalone Fact.","source_turn_ids":[1],"fact_type":"state","state_status":"current"}]}
 
 DATASET: {dataset_name}
 SEGMENT_ID: {segment_id}

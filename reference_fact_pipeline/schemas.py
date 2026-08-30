@@ -9,11 +9,16 @@ FactType = Literal[
     "identity",
     "state",
     "event",
+    "plan",
     "preference",
     "goal",
     "relationship",
+    "decision",
+    "constraint",
+    "health",
     "knowledge",
     "assistant_answer",
+    "negative",
     "other",
 ]
 StateStatus = Literal["current", "historical", "timeless", "unspecified"]
@@ -91,6 +96,7 @@ class StageUsage:
     latency_ms: int
     provider_request_id: str = ""
     finish_reason: str = ""
+    cost_status: str = "known"
 
     @property
     def total_cost(self) -> float:
@@ -134,5 +140,26 @@ class FrozenReferenceSet:
         value["segment_turn_ids"] = list(self.segment_turn_ids)
         value["reference_facts"] = [item.to_dict() for item in self.reference_facts]
         value["stage_usage"] = [item.to_dict() for item in self.stage_usage]
+        value["total_input_tokens"] = sum(
+            item.input_tokens for item in self.stage_usage
+        )
+        value["total_output_tokens"] = sum(
+            item.output_tokens for item in self.stage_usage
+        )
+        value["total_tokens"] = (
+            value["total_input_tokens"] + value["total_output_tokens"]
+        )
+        value["provider_usage_stage_count"] = sum(
+            item.usage_source == "provider" for item in self.stage_usage
+        )
+        value["estimated_usage_stage_count"] = sum(
+            item.usage_source != "provider" for item in self.stage_usage
+        )
         value["total_cost"] = sum(item.total_cost for item in self.stage_usage)
+        value["cost_complete"] = all(
+            item.cost_status == "known" for item in self.stage_usage
+        )
+        value["unknown_cost_stage_count"] = sum(
+            item.cost_status != "known" for item in self.stage_usage
+        )
         return value
