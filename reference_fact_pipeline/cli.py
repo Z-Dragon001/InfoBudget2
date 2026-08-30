@@ -21,6 +21,7 @@ from infobudget.rl_router.ledger import SqliteLedger, atomic_write_json
 from reference_fact_pipeline.config import load_reference_config
 from reference_fact_pipeline.io import export_reference_jsonl, load_topic_segments
 from reference_fact_pipeline.pipeline import ReferenceFactPipeline
+from reference_fact_pipeline.progress import ReferenceFactProgress
 
 
 def main() -> None:
@@ -69,12 +70,14 @@ def main() -> None:
     if not segments:
         raise ValueError("no topic segments remain after dataset/sample filters")
 
+    progress = ReferenceFactProgress(len(segments))
     client = build_reference_api_client(
         timeout_seconds=config.timeout_seconds,
         max_retries=config.max_retries,
         retry_backoff_seconds=config.retry_backoff_seconds,
         cloudflare_request_interval_seconds=config.cloudflare_request_interval_seconds,
         cloudflare_402_backoff_seconds=config.cloudflare_402_backoff_seconds,
+        progress_callback=progress.handle_event,
     )
     pipeline = ReferenceFactPipeline(
         config=config,
@@ -84,6 +87,7 @@ def main() -> None:
         prompt_dir=Path(__file__).with_name("prompts"),
         candidate_prompt_dir=bundle.prompt_dir,
         raw_archive_dir=args.output_dir / "raw_responses" / run_id,
+        progress_callback=progress.handle_event,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     ledger = SqliteLedger(
@@ -97,6 +101,15 @@ def main() -> None:
         key_fields=("run_id", "segment_id", "source_content_hash", "config_hash"),
     )
     existing_rows = ledger.read_all()
+    existing_rows_by_key = {
+        (
+            str(row.get("run_id")),
+            str(row.get("segment_id")),
+            str(row.get("source_content_hash")),
+            str(row.get("config_hash")),
+        ): row
+        for row in existing_rows
+    }
     existing_failures = {
         (
             str(row.get("run_id")),
@@ -125,6 +138,7 @@ def main() -> None:
     consecutive_auto_resumes = 0
     for segment_index, segment in enumerate(segments):
         key = (run_id, segment.segment_id, segment.source_content_hash, pipeline.effective_config_hash)
+        progress.start_segment(segment.segment_id)
         if key in completed:
             if not args.resume:
                 raise RuntimeError(
@@ -141,6 +155,9 @@ def main() -> None:
                     }
                 )
             skipped += 1
+            progress.segment_finished(
+                "skipped", existing_row=existing_rows_by_key.get(key)
+            )
             continue
         while True:
             try:
@@ -160,6 +177,7 @@ def main() -> None:
                     failure_ledger.upsert(resolved)
                     existing_failures[key] = resolved
                 consecutive_auto_resumes = 0
+                progress.segment_finished("built")
                 break
             except (ModelAPIError, ValueError) as error:
                 previous_failure = existing_failures.get(key, {})
@@ -185,15 +203,30 @@ def main() -> None:
                     if consecutive_auto_resumes < config.cloudflare_max_auto_resumes:
                         consecutive_auto_resumes += 1
                         circuit_pause_count += 1
+                        progress.handle_event(
+                            {
+                                "event": "wait_started",
+                                "reason": "campaign_circuit_pause",
+                                "seconds": config.cloudflare_circuit_pause_seconds,
+                            }
+                        )
                         time.sleep(config.cloudflare_circuit_pause_seconds)
+                        progress.handle_event(
+                            {
+                                "event": "wait_finished",
+                                "resume_stage": "retrying_same_segment",
+                            }
+                        )
                         continue
                     failed += 1
+                    progress.segment_finished("failed")
                     run_paused = True
                     pause_reason = "persistent_cloudflare_wholesale_rate_limit"
                     remaining_segment_count = len(segments) - segment_index - 1
                     break
                 failed += 1
                 consecutive_auto_resumes = 0
+                progress.segment_finished("failed")
                 break
         if run_paused:
             break
@@ -232,6 +265,7 @@ def main() -> None:
         model_roles={role: bundle.models[role].effective_model_name for role in sorted(roles)},
     )
     atomic_write_json(args.output_dir / "manifest.json", manifest)
+    progress.close(paused=run_paused, incomplete=bool(selected_failure_rows))
     print(json.dumps(manifest, ensure_ascii=False, sort_keys=True))
 
 

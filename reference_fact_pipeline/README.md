@@ -46,6 +46,12 @@ LoCoMo 示例：
 
 LongMemEval 只需把 `--dataset` 和 `--segments` 改成对应数据集。小规模连通性验证可添加 `--limit 2`；中断后使用相同 `--run-id --resume`，SQLite ledger 会跳过已完成且内容哈希、配置哈希一致的主题段。
 
+运行时进度写入 stderr，最终 manifest JSON 单独写入 stdout，因此仍可安全重定向机器可读结果。交互终端显示单行实时进度条；非交互日志按事件逐行输出。进度包含当前主题段和阶段、已构建/跳过/失败数、API 调用数、累计输入/输出 token，以及 Luna 请求间隔、402长退避和 campaign 熔断等待时长。例如：
+
+```text
+Gold Fact: |####--------------------| 180/1054 segments elapsed=... eta=... item=... stage=initial_grounding built=175 skipped=5 failed=0 calls=594 input_tok=... output_tok=...
+```
+
 需要的 API key 仍从项目 `.env` 读取。默认角色对应 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN` 和 `JUDGE_MODEL_API_KEY`。
 
 输出目录包括：

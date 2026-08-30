@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from infobudget.rl_router.api import ChatCompletionClient, LLMResponse
 from infobudget.rl_router.ledger import atomic_write_json
@@ -38,6 +38,7 @@ class ReferenceFactPipeline:
         prompt_dir: str | Path,
         candidate_prompt_dir: str | Path = "configs/prompts",
         raw_archive_dir: str | Path | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.config = config
         self.models = models
@@ -46,6 +47,7 @@ class ReferenceFactPipeline:
         self.prompt_dir = Path(prompt_dir)
         self.candidate_prompt_dir = Path(candidate_prompt_dir)
         self.raw_archive_dir = Path(raw_archive_dir) if raw_archive_dir else None
+        self.progress_callback = progress_callback
         self._prompts = {
             name: (self.prompt_dir / filename).read_text(encoding="utf-8")
             for name, filename in {
@@ -337,12 +339,24 @@ class ReferenceFactPipeline:
         self, *, stage: str, role: str, prompt: str, max_new_tokens: int
     ) -> tuple[LLMResponse, StageUsage]:
         model = self.models[role]
-        response = self.client.complete(
-            model_spec=model,
-            prompt=prompt,
-            max_new_tokens=max_new_tokens,
-            json_mode=True,
-        )
+        self._notify_progress({"event": "stage_started", "stage": stage, "role": role})
+        try:
+            response = self.client.complete(
+                model_spec=model,
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                json_mode=True,
+            )
+        except Exception as error:
+            self._notify_progress(
+                {
+                    "event": "stage_failed",
+                    "stage": stage,
+                    "role": role,
+                    "error": str(error)[:500],
+                }
+            )
+            raise
         price = self.prices.get(model.model_name) or self.prices.get(model.effective_model_name)
         input_cost = (
             response.input_tokens * price.official_price_in_per_1m / 1_000_000
@@ -370,7 +384,25 @@ class ReferenceFactPipeline:
             finish_reason=response.finish_reason,
             cost_status="known" if price is not None else "unknown_missing_price_snapshot",
         )
+        self._notify_progress(
+            {
+                "event": "stage_completed",
+                "stage": stage,
+                "role": role,
+                "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens,
+                "latency_ms": response.latency_ms,
+            }
+        )
         return response, usage
+
+    def _notify_progress(self, event: dict[str, Any]) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(event)
+        except Exception:
+            return
 
     def _render(self, template: str, *, segment: TopicSegment, **values: str) -> str:
         replacements = {

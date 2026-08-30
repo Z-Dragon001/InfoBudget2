@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import asdict, replace
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from reference_fact_pipeline.cloudflare_api import CloudflareWholesaleRateLimitE
 from reference_fact_pipeline.config import ReferencePipelineConfig
 from reference_fact_pipeline.metrics import metrics_from_counts, score_fact_sets
 from reference_fact_pipeline.pipeline import ReferenceFactPipeline
+from reference_fact_pipeline.progress import ReferenceFactProgress
 
 
 class QueueClient:
@@ -536,3 +538,43 @@ def test_cli_auto_resumes_same_segment_after_circuit_pause(
     assert manifest["unresolved_failure_count"] == 0
     assert manifest["run_paused"] is False
     assert manifest["run_complete"] is True
+
+
+def test_reference_progress_reports_stages_waits_tokens_and_resume_counts():
+    stream = StringIO()
+    progress = ReferenceFactProgress(2, stream=stream)
+    progress.start_segment("segment-1")
+    progress.handle_event(
+        {"event": "stage_started", "stage": "initial_extraction", "role": "gold"}
+    )
+    progress.handle_event(
+        {
+            "event": "stage_completed",
+            "stage": "initial_extraction",
+            "input_tokens": 100,
+            "output_tokens": 20,
+        }
+    )
+    progress.handle_event(
+        {"event": "wait_started", "reason": "wholesale_402_backoff", "seconds": 60}
+    )
+    progress.segment_finished("built")
+    progress.start_segment("segment-2")
+    progress.segment_finished(
+        "skipped",
+        existing_row={
+            "total_input_tokens": 50,
+            "total_output_tokens": 10,
+            "stage_usage": [{}, {}],
+        },
+    )
+    progress.close(paused=False)
+    rendered = stream.getvalue()
+    assert "initial_extraction" in rendered
+    assert "wholesale_402_backoff:60s" in rendered
+    assert "2/2 segments" in rendered
+    assert "built=1" in rendered
+    assert "skipped=1" in rendered
+    assert "calls=3" in rendered
+    assert "input_tok=150" in rendered
+    assert "output_tok=30" in rendered

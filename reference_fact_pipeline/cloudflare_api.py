@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from threading import Lock
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from infobudget.rl_router.api import (
     ChatCompletionClient,
@@ -64,6 +64,7 @@ class CloudflareResponsesClient:
     account_id_env: str = "CLOUDFLARE_ACCOUNT_ID"
     request_interval_seconds: float = 0.0
     wholesale_402_backoff_seconds: tuple[float, ...] = (60.0, 120.0, 300.0)
+    progress_callback: Callable[[dict[str, Any]], None] | None = None
     _last_request_at: float = field(default=0.0, init=False, repr=False)
     _request_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
@@ -200,7 +201,12 @@ class CloudflareResponsesClient:
                         ) from exc
                     delay = self.wholesale_402_backoff_seconds[wholesale_retries]
                     wholesale_retries += 1
-                    self._sleep(attempt - 1, exc.headers, explicit_delay=delay)
+                    self._sleep(
+                        attempt - 1,
+                        exc.headers,
+                        explicit_delay=delay,
+                        reason="wholesale_402_backoff",
+                    )
                     continue
                 if not retryable or transport_retries >= self.max_retries:
                     raise ModelAPIError(
@@ -234,11 +240,18 @@ class CloudflareResponsesClient:
             now = time.monotonic()
             delay = self.request_interval_seconds - (now - self._last_request_at)
             if self._last_request_at > 0 and delay > 0:
+                self._notify_wait("luna_request_interval", delay)
                 time.sleep(delay)
+                self._notify_wait_finished("requesting_luna")
             self._last_request_at = time.monotonic()
 
     def _sleep(
-        self, attempt: int, headers: Any, *, explicit_delay: float | None = None
+        self,
+        attempt: int,
+        headers: Any,
+        *,
+        explicit_delay: float | None = None,
+        reason: str = "api_retry_backoff",
     ) -> None:
         delay = explicit_delay
         if delay is None:
@@ -246,7 +259,28 @@ class CloudflareResponsesClient:
         if delay is None:
             base = self.retry_backoff_seconds * (2**attempt)
             delay = base + random.uniform(0.0, max(0.0, base * 0.25))
-        time.sleep(max(0.0, delay))
+        delay = max(0.0, delay)
+        self._notify_wait(reason, delay)
+        time.sleep(delay)
+        self._notify_wait_finished("retrying_api")
+
+    def _notify_wait(self, reason: str, seconds: float) -> None:
+        self._notify_progress(
+            {"event": "wait_started", "reason": reason, "seconds": seconds}
+        )
+
+    def _notify_wait_finished(self, resume_stage: str) -> None:
+        self._notify_progress(
+            {"event": "wait_finished", "resume_stage": resume_stage}
+        )
+
+    def _notify_progress(self, event: dict[str, Any]) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(event)
+        except Exception:
+            return
 
 
 @dataclass(slots=True)
@@ -272,6 +306,7 @@ def build_reference_api_client(
     retry_backoff_seconds: float,
     cloudflare_request_interval_seconds: float = 0.0,
     cloudflare_402_backoff_seconds: tuple[float, ...] = (60.0, 120.0, 300.0),
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> ReferenceAPIClient:
     options = {
         "timeout_seconds": timeout_seconds,
@@ -284,6 +319,7 @@ def build_reference_api_client(
             **options,
             request_interval_seconds=cloudflare_request_interval_seconds,
             wholesale_402_backoff_seconds=cloudflare_402_backoff_seconds,
+            progress_callback=progress_callback,
         ),
     )
 
