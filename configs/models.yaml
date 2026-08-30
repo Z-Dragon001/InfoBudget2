@@ -44,11 +44,11 @@ models:
   qa_reader:
     deploy: "api"
     backend: "openai_compatible"
-    model_name: "gpt-4o-mini"
-    request_model_name: "gpt-4o-mini"
+    model_name: "openai/gpt-4o-mini"
+    request_model_name: "openai/gpt-4o-mini"
     tokenizer_name: "gpt-4o-mini"
     tokenizer_local_path: "./models/tokenizers/qa_reader"
-    api_base_url: "https://api.openai.com/v1"
+    api_base_url: "https://api.cloudflare.com/client/v4/accounts/655cc82801c27840e2fb991b519ed342/ai/v1"
     api_key_env: "QA_READER_API_KEY"
     max_context_tokens: 128000
     max_output_tokens: 16384
@@ -58,11 +58,11 @@ models:
   judge_llm:
     deploy: "api"
     backend: "openai_compatible"
-    model_name: "gpt-4o-mini"
-    request_model_name: "gpt-4o-mini"
+    model_name: "openai/gpt-4o-mini"
+    request_model_name: "openai/gpt-4o-mini"
     tokenizer_name: "gpt-4o-mini"
     tokenizer_local_path: "./models/tokenizers/judge_llm"
-    api_base_url: "https://api.openai.com/v1"
+    api_base_url: "https://api.cloudflare.com/client/v4/accounts/655cc82801c27840e2fb991b519ed342/ai/v1"
     api_key_env: "JUDGE_MODEL_API_KEY"
     max_context_tokens: 128000
     max_output_tokens: 16384
