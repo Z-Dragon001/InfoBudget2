@@ -7,7 +7,7 @@ models:
     request_model_name: "Qwen2.5-7B-Instruct"
     tokenizer_name: "Qwen/Qwen2.5-7B-Instruct"
     tokenizer_local_path: "./models/tokenizers/small"
-    api_base_url: "https://127.0.0.1:8003/v1"
+    api_base_url: "http://127.0.0.1:8003/v1"
     api_key_env: "SILICONFLOW_API_KEY"
     max_context_tokens: 32768
     max_output_tokens: 8192
