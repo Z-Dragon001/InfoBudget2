@@ -757,6 +757,7 @@ class CandidateGenerator:
                             embedding_dimension=self.encoder.dimension,
                             segment_order=segment.segment_order,
                             created_at=created_at,
+                            model_id=self.models[tier].stable_model_id,
                             extra={
                                 **self._segment_audit_metadata(segment, tier),
                                 **_source_provenance(segment, source_ids),
@@ -1000,6 +1001,7 @@ class CandidateGenerator:
             "segment_line_count": segment.text.count("\n") + 1,
             "extractor_configured_model": model.model_name,
             "extractor_request_model": model.effective_model_name,
+            "model_id": model.stable_model_id,
             "extractor_backend": model.backend,
             "extractor_api_base_url": model.api_base_url,
             "prompt_version": self.prompt_versions[tier],
@@ -1480,6 +1482,7 @@ def _scope_hash(
             for tier, prompt in prompts.items()
         },
         "models": {tier: models[tier].effective_model_name for tier in models},
+        "model_ids": {tier: models[tier].stable_model_id for tier in models},
         "extraction_config": config,
         "audit_context": audit_context or {},
     }

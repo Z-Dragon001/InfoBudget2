@@ -55,7 +55,7 @@ storage:
   prefer_grpc: false
   timeout_seconds: 300
   api_key_env: ""
-  collection_namespace: "{model_family}_{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v3"
+  collection_namespace: "{project_name}_{model_family}_{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v3"
   vector_size: 384
   distance: "Cosine"
   require_sample_filter: true

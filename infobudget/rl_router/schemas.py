@@ -181,6 +181,7 @@ class FactRecord:
     embedding_dimension: int
     segment_order: int = 0
     created_at: str = ""
+    model_id: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -216,6 +217,7 @@ class FactRecord:
         value = asdict(self)
         value.pop("extra")
         value.update(self.extra)
+        value["model_id"] = str(value.get("model_id") or self.extractor_model)
         value["schema_version"] = QDRANT_FACT_SCHEMA_VERSION
         value["source_content_hash"] = value.pop("segment_hash")
         return value

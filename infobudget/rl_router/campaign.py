@@ -44,6 +44,7 @@ def initialize_campaign(
     prompt_role = bundle.fact_extraction_prompt_role(dataset_name)
     prompt_version = bundle.fact_extraction_prompt_version(dataset_name)
     scope = {
+        "project_name": bundle.project.config.project.name,
         "model_family": bundle.rl["model_family"],
         "dataset_name": dataset_name,
         "split": split,
@@ -59,6 +60,9 @@ def initialize_campaign(
         "embedding_model_hash": embedding_hash,
         "models": {
             tier: bundle.project.models[tier].effective_model_name for tier in TIERS
+        },
+        "model_ids": {
+            tier: bundle.project.models[tier].stable_model_id for tier in TIERS
         },
         "fact_extraction_prompt_role": prompt_role,
         "fact_extraction_prompt_version": prompt_version,
@@ -213,12 +217,16 @@ def validate_campaign_environment(
     dataset_name = str(manifest.get("dataset_name") or "")
     prompt_role = bundle.fact_extraction_prompt_role(dataset_name)
     actual = {
+        "project_name": bundle.project.config.project.name,
         "model_family": bundle.rl["model_family"],
         "embedding_model_hash": (
             precomputed_embedding_hash or memory_embedding_hash(bundle)
         ),
         "models": {
             tier: bundle.project.models[tier].effective_model_name for tier in TIERS
+        },
+        "model_ids": {
+            tier: bundle.project.models[tier].stable_model_id for tier in TIERS
         },
         "fact_extraction_prompt_role": prompt_role,
         "fact_extraction_prompt_version": bundle.fact_extraction_prompt_version(

@@ -59,6 +59,7 @@ def main() -> None:
 
     namespace = resolve_collection_namespace(
         bundle.rl["storage"],
+        project_name=bundle.project.config.project.name,
         model_family=bundle.rl["model_family"],
         dataset=first.dataset_name,
         split=first.split,

@@ -216,6 +216,7 @@ def main() -> None:
     embedding_hash = memory_embedding_hash(bundle)
     source_namespace = resolve_collection_namespace(
         bundle.rl["storage"],
+        project_name=bundle.project.config.project.name,
         model_family=bundle.rl["model_family"],
         dataset=args.dataset,
         split=args.split,

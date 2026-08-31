@@ -1,0 +1,14 @@
+schema_version: "quality_gap_router_v1"
+
+quality_gap_router:
+  epsilon_grid_start: 0.00
+  epsilon_grid_end: 0.15
+  epsilon_grid_step: 0.01
+  quality_floor: 0.30
+  uncertainty_enabled: true
+  confidence: 0.95
+  violation_threshold: 0.05
+  max_mean_regret: 0.02
+  max_violation_rate: 0.05
+  low_quality_action: "predicted_best"
+  ood_action: "predicted_best"

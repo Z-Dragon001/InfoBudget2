@@ -155,6 +155,7 @@ def test_fact_payload_round_trip_preserves_extra_provenance() -> None:
     assert restored.segment_hash == "segment-hash"
     assert restored.extra["audit_field"] == "kept"
     assert restored.payload()["model_family"] == "qwen"
+    assert restored.payload()["model_id"] == "model-small"
 
 
 def test_budget_optimizer_selects_one_model_per_segment_and_respects_budget() -> None:

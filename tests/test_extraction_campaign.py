@@ -14,26 +14,28 @@ from infobudget.rl_router.ledger import atomic_write_json
 from infobudget.rl_router.manifest import resolve_collection_namespace
 
 
-def test_embedding_hash_is_part_of_collection_namespace() -> None:
+def test_project_and_embedding_hash_are_part_of_collection_namespace() -> None:
     namespace = resolve_collection_namespace(
         {
             "collection_namespace": (
-                "{model_family}_{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v3"
+                "{project_name}_{model_family}_{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v3"
             )
         },
+        project_name="Info Budget 2",
         model_family="llama",
         dataset="longmemeval",
         split="full",
         segmentation_version="nsp_v1",
         embedding_hash="abcdef0123456789",
     )
-    assert namespace == "llama_longmemeval_full_nsp_v1_abcdef012345_fact_v3"
+    assert namespace == "info-budget-2_llama_longmemeval_full_nsp_v1_abcdef012345_fact_v3"
     qwen_namespace = resolve_collection_namespace(
         {
             "collection_namespace": (
-                "{model_family}_{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v3"
+                "{project_name}_{model_family}_{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v3"
             )
         },
+        project_name="Info Budget 2",
         model_family="qwen",
         dataset="longmemeval",
         split="full",
@@ -41,7 +43,7 @@ def test_embedding_hash_is_part_of_collection_namespace() -> None:
         embedding_hash="abcdef0123456789",
     )
     assert qwen_namespace != namespace
-    assert qwen_namespace.startswith("qwen_")
+    assert qwen_namespace.startswith("info-budget-2_qwen_")
 
 
 def test_campaign_requires_all_runs_and_aggregate_quality_to_pass(tmp_path) -> None:
@@ -124,13 +126,19 @@ def test_campaign_pins_only_the_selected_dataset_prompt(tmp_path) -> None:
     embedding_root.mkdir()
     (embedding_root / "config.json").write_text("{}", encoding="utf-8")
     roles = {
-        tier: SimpleNamespace(effective_model_name=f"model-{tier}")
+        tier: SimpleNamespace(
+            effective_model_name=f"model-{tier}", stable_model_id=f"model-{tier}"
+        )
         for tier in ("small", "medium", "large")
     }
     paths = {"locomo": locomo_prompt, "longmemeval": longmemeval_prompt}
     versions = {"locomo": "locomo-v1", "longmemeval": "longmemeval-v1"}
     bundle = SimpleNamespace(
-        project=SimpleNamespace(root_dir=tmp_path, models=roles),
+        project=SimpleNamespace(
+            root_dir=tmp_path,
+            models=roles,
+            config=SimpleNamespace(project=SimpleNamespace(name="InfoBudget")),
+        ),
         embeddings={"memory": {"local_path": "embedding"}},
         rl={
             "model_family": "qwen",

@@ -36,19 +36,19 @@ model_family: "qwen"
 Qdrant namespace 模板调整为：
 
 ```yaml
-collection_namespace: "{model_family}_{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v3"
+collection_namespace: "{project_name}_{model_family}_{dataset}_{split}_{segmentation_version}_{embedding_hash}_fact_v3"
 ```
 
 示例：
 
 ```text
-qwen_locomo_full_nsp_text_tiling_v1_a1b2c3d4e5f6_fact_v3_L
-qwen_locomo_full_nsp_text_tiling_v1_a1b2c3d4e5f6_fact_v3_M
-qwen_locomo_full_nsp_text_tiling_v1_a1b2c3d4e5f6_fact_v3_H
+infobudget_qwen_locomo_full_nsp_text_tiling_v1_a1b2c3d4e5f6_fact_v3_L
+infobudget_qwen_locomo_full_nsp_text_tiling_v1_a1b2c3d4e5f6_fact_v3_M
+infobudget_qwen_locomo_full_nsp_text_tiling_v1_a1b2c3d4e5f6_fact_v3_H
 
-llama_locomo_full_nsp_text_tiling_v1_a1b2c3d4e5f6_fact_v3_L
-llama_locomo_full_nsp_text_tiling_v1_a1b2c3d4e5f6_fact_v3_M
-llama_locomo_full_nsp_text_tiling_v1_a1b2c3d4e5f6_fact_v3_H
+infobudget_llama_locomo_full_nsp_text_tiling_v1_a1b2c3d4e5f6_fact_v3_L
+infobudget_llama_locomo_full_nsp_text_tiling_v1_a1b2c3d4e5f6_fact_v3_M
+infobudget_llama_locomo_full_nsp_text_tiling_v1_a1b2c3d4e5f6_fact_v3_H
 ```
 
 因此，即使数据集、split、分段版本和 embedding 完全相同，Qwen 与 Llama 也不会进入同一组 L/M/H/S collections。

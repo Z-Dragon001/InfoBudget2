@@ -47,9 +47,19 @@ def test_api_roles_have_credentials_and_known_price_scopes() -> None:
     assert rl_bundle.embeddings["memory"]["long_text_strategy"] == "truncate"
     assert storage["vector_size"] == 384
     assert rl_bundle.rl["model_family"] == "qwen"
+    assert {
+        tier: rl_bundle.project.models[tier].stable_model_id
+        for tier in ("small", "medium", "large")
+    } == {
+        "small": "qwen2.5-7b-instruct",
+        "medium": "qwen2.5-32b-instruct",
+        "large": "qwen2.5-72b-instruct",
+    }
     assert storage["mode"] == "server"
     assert storage["url"] == "http://127.0.0.1:6333"
     assert storage["grpc_port"] == 6334
+    assert rl_bundle.project.config.project.name == "InfoBudget"
+    assert "{project_name}" in storage["collection_namespace"]
     assert "{embedding_hash}" in storage["collection_namespace"]
     assert "{model_family}" in storage["collection_namespace"]
     compose = yaml.safe_load(
@@ -119,6 +129,7 @@ def test_model_spec_resolves_only_environment_key(monkeypatch) -> None:
     )
     monkeypatch.setenv("EXAMPLE_MODEL_API_KEY", "test-key")
     assert spec.resolved_api_key() == "test-key"
+    assert spec.stable_model_id == "example-model"
 
 
 def test_project_env_file_loads_without_overriding_process_environment(

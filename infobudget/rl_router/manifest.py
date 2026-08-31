@@ -30,6 +30,7 @@ def create_experiment_manifest(
     manifest = {
         "experiment_id": scope.pop("experiment_id", datetime.now(timezone.utc).strftime("exp_%Y%m%dT%H%M%SZ")),
         **scope,
+        "project_name": bundle.project.config.project.name,
         "model_family": bundle.rl["model_family"],
         "random_seed": bundle.rl["seed"],
         "models": {name: _safe_model(spec) for name, spec in bundle.project.models.items()},
@@ -60,6 +61,7 @@ def memory_embedding_hash(bundle: RLConfigBundle) -> str:
 def resolve_collection_namespace(
     storage: dict,
     *,
+    project_name: str,
     dataset: str,
     split: str,
     segmentation_version: str,
@@ -71,7 +73,13 @@ def resolve_collection_namespace(
     normalized_family = str(model_family).strip().lower()
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", normalized_family):
         raise ValueError("model_family is invalid for the Qdrant namespace")
+    normalized_project = re.sub(
+        r"[^a-z0-9_-]+", "-", str(project_name).strip().lower()
+    ).strip("-_")
+    if not normalized_project:
+        raise ValueError("project_name is invalid for the Qdrant namespace")
     return str(storage["collection_namespace"]).format(
+        project_name=normalized_project,
         model_family=normalized_family,
         dataset=dataset,
         split=split,

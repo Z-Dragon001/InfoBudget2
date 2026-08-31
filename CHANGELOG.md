@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-08-30
+
+- Added an independent local quality-gap router that selects the cheapest model within a
+  validation-calibrated epsilon of the predicted best Strict Fact-F1, without a sample-level
+  budget or QA/Judge training signal.
+- Added validation-only pairwise-gap residual calibration, quality-floor and OOD fallbacks,
+  held-out regret/noninferiority/cost evaluation, three CLI entry points, configuration,
+  documentation, and tests while retaining the existing budget optimizer as a baseline.
+
 ## 2026-08-02
 
 - Implemented the fact-only reinforcement-learning memory router described by the current

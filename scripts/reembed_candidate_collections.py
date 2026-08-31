@@ -47,6 +47,7 @@ def main() -> None:
     target_embedding_hash = memory_embedding_hash(bundle)
     target_namespace = resolve_collection_namespace(
         bundle.rl["storage"],
+        project_name=bundle.project.config.project.name,
         model_family=bundle.rl["model_family"],
         dataset=first.dataset_name,
         split=first.split,
@@ -83,6 +84,7 @@ def main() -> None:
             )
             facts = [FactRecord.from_payload(dict(point.payload or {})) for point in points]
             for fact in facts:
+                fact.model_id = bundle.project.models[tier].stable_model_id
                 fact.embedding_model = str(embedding["model_name"])
                 fact.embedding_dimension = int(embedding["dimension"])
                 fact.extra.update(

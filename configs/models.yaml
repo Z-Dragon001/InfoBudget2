@@ -1,12 +1,13 @@
 models:
   small:
+    model_id: "qwen2.5-7b-instruct"
     deploy: "api"
     backend: "openai_compatible"
     model_name: "Qwen/Qwen2.5-7B-Instruct"
-    request_model_name: "Qwen/Qwen2.5-7B-Instruct"
+    request_model_name: "Qwen2.5-7B-Instruct"
     tokenizer_name: "Qwen/Qwen2.5-7B-Instruct"
     tokenizer_local_path: "./models/tokenizers/small"
-    api_base_url: "https://api.siliconflow.cn/v1"
+    api_base_url: "https://127.0.0.1:8003/v1"
     api_key_env: "SILICONFLOW_API_KEY"
     max_context_tokens: 32768
     max_output_tokens: 8192
@@ -14,11 +15,12 @@ models:
     dtype: "n/a"
 
   medium:
+    model_id: "qwen2.5-32b-instruct"
     deploy: "api"
     backend: "openai_compatible"
-    model_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
-    request_model_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
-    tokenizer_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    model_name: "Qwen/Qwen2.5-32B-Instruct"
+    request_model_name: "Qwen/Qwen2.5-32B-Instruct"
+    tokenizer_name: "Qwen/Qwen2.5-32B-Instruct"
     tokenizer_local_path: "./models/tokenizers/medium"
     api_base_url: "https://api.siliconflow.cn/v1"
     api_key_env: "MEDIUM_MODEL_API_KEY"
@@ -28,13 +30,14 @@ models:
     dtype: "n/a"
 
   large:
+    model_id: "qwen2.5-72b-instruct"
     deploy: "api"
     backend: "openai_compatible"
-    model_name: "qwen/qwen3-next-80b-a3b-instruct"
-    request_model_name: "qwen/qwen3-next-80b-a3b-instruct"
-    tokenizer_name: "qwen/qwen3-next-80b-a3b-instruct"
+    model_name: "Qwen/Qwen2.5-72B-Instruct"
+    request_model_name: "Qwen/Qwen2.5-72B-Instruct"
+    tokenizer_name: "Qwen/Qwen2.5-72B-Instruct"
     tokenizer_local_path: "./models/tokenizers/large"
-    api_base_url: "https://api.novita.ai/openai"
+    api_base_url: "https://api.siliconflow.cn/v1"
     api_key_env: "LARGE_MODEL_API_KEY"
     max_context_tokens: 131072
     max_output_tokens: 32000

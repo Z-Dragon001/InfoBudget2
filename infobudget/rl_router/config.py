@@ -133,6 +133,13 @@ def load_rl_bundle(config_dir: str | Path = "configs") -> RLConfigBundle:
             raise ValueError(
                 f"extraction buffer {tier} reserved output exceeds model max_output_tokens"
             )
+    candidate_model_ids = [
+        project.models[tier].stable_model_id for tier in ("small", "medium", "large")
+    ]
+    if any(not model_id for model_id in candidate_model_ids):
+        raise ValueError("candidate model_id values must be non-empty")
+    if len(candidate_model_ids) != len(set(candidate_model_ids)):
+        raise ValueError("small, medium, and large must use distinct model_id values")
     reliability = rl.get("api_reliability", {})
     if int(reliability.get("timeout_seconds", 120)) <= 0:
         raise ValueError("api_reliability.timeout_seconds must be positive")
@@ -143,6 +150,7 @@ def load_rl_bundle(config_dir: str | Path = "configs") -> RLConfigBundle:
     storage = rl.get("storage", {})
     namespace_template = str(storage.get("collection_namespace") or "")
     required_namespace_fields = {
+        "{project_name}",
         "{model_family}",
         "{dataset}",
         "{split}",

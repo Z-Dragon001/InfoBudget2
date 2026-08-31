@@ -163,7 +163,7 @@ def test_qdrant_server_config_uses_remote_client_and_payload_indexes(monkeypatch
         "prefer_grpc": False,
         "grpc_port": 6334,
     }
-    assert len(clients[1].indexes) == 4 * 12
+    assert len(clients[1].indexes) == 4 * 13
     assert all(wait is True for *_, wait in clients[1].indexes)
     store.close()
 
@@ -981,6 +981,7 @@ def test_candidate_tiers_can_run_independently_under_one_run_id(tmp_path) -> Non
         )
         assert len(points) == 1
         assert points[0].payload["source_ids"] == [0]
+        assert points[0].payload["model_id"] == tier
         assert len(points[0].payload["source_provenance"]) == 1
         assert points[0].payload["extraction_visible_source_ids"] == [0]
         assert points[0].payload["extraction_dropped_source_ids"] == [1]
@@ -1127,6 +1128,7 @@ def test_segment_audit_keeps_zero_fact_segments_and_full_provenance(tmp_path) ->
     assert points[0].payload["schema_version"] == "qdrant_fact_v3"
     assert points[0].payload["model_family"] == "qwen"
     assert points[0].payload["campaign_id"] == "qwen-campaign"
+    assert points[0].payload["model_id"] == "configured-small"
     store.close()
 
 

@@ -102,10 +102,16 @@ class ModelSpec:
     api_base_url: str = ""
     api_key_env: str = ""
     request_model_name: str = ""
+    model_id: str = ""
 
     @property
     def effective_model_name(self) -> str:
         return self.request_model_name or self.model_name
+
+    @property
+    def stable_model_id(self) -> str:
+        """Stable experiment identity shared with MemoryPrint and quality labels."""
+        return self.model_id.strip() or self.model_name
 
     @property
     def max_input_tokens(self) -> int:

@@ -231,6 +231,54 @@ uv run python scripts/assemble_quality_routes.py <one-sample-segments.jsonl> `
 evaluated with the `consistency` command using sign agreement and Spearman correlation;
 the local-quality and QA-delta scales are never directly subtracted.
 
+### Local quality-gap routing without a sample-level budget
+
+The independent `infobudget.quality_gap_router` package reuses the trained scalar quality
+scorer but replaces the multiple-choice budget optimizer with an epsilon-noninferiority
+decision. For each segment it selects the cheapest candidate whose predicted Strict
+Fact-F1 is within the validation-selected `epsilon` of the predicted best candidate.
+QA/Reader/Judge signals are not used by this decision path.
+
+Calibrate `epsilon` and the optional conservative pairwise-gap residual bound on validation
+artifacts only:
+
+```powershell
+uv run python scripts/calibrate_quality_gap.py `
+  --predictions <validation_predictions.jsonl> `
+  --labels <validation_fact_quality_labels.jsonl> `
+  --costs <validation_segment_model_costs.jsonl> `
+  --output <quality_gap_calibration.json> `
+  --sweep-output <quality_gap_validation_sweep.jsonl>
+```
+
+Route held-out or deployment segments with the frozen scorer and calibration artifact:
+
+```powershell
+uv run python scripts/route_with_quality_gap.py `
+  --segments <test-segment-root> `
+  --capabilities <model_capabilities.json> `
+  --costs <test_segment_model_costs.jsonl> `
+  --checkpoint <quality-training-output/quality_scorer.pt> `
+  --calibration <quality_gap_calibration.json> `
+  --output <quality_gap_routing_decisions.jsonl>
+```
+
+Evaluate realized held-out Fact quality, regret, noninferiority violations, model selection
+counts, and cost saving against the highest-cost candidate:
+
+```powershell
+uv run python scripts/evaluate_quality_gap_router.py `
+  --predictions <test_predictions.jsonl> `
+  --labels <test_fact_quality_labels.jsonl> `
+  --costs <test_segment_model_costs.jsonl> `
+  --calibration <quality_gap_calibration.json> `
+  --output <quality_gap_test_metrics.json> `
+  --rows-output <quality_gap_test_rows.jsonl>
+```
+
+The full method, validation discipline, uncertainty rule, safeguards, and experimental
+boundaries are documented in `docs/基于质量差距的局部模型路由完整方案.md`.
+
 The 384-dimensional embedding changes the Qdrant vector schema. Existing 1024-dimensional
 BGE-M3 collections remain historical artifacts and must not be reused. Collection names
 include the embedding directory hash, so freshly extracted MiniLM candidates receive a

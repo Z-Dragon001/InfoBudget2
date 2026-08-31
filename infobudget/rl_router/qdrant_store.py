@@ -409,7 +409,7 @@ class FactQdrantStore:
                 continue
             for field in (
                 "dataset_name", "split", "sample_id", "session_id", "segment_id", "memory_tier",
-                "model_family", "campaign_id", "extraction_run_id", "batch_id", "assembly_id",
+                "model_id", "model_family", "campaign_id", "extraction_run_id", "batch_id", "assembly_id",
                 "policy_version",
             ):
                 self.client.create_payload_index(
