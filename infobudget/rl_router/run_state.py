@@ -11,8 +11,25 @@ from pathlib import Path
 from typing import Any
 
 
-ACTIVE_BATCH_STATES = {"planned", "requesting", "api_succeeded", "parsed", "embedded"}
-FINAL_BATCH_STATES = {"committed", "failed_terminal"}
+ACTIVE_BATCH_STATES = {
+    "planned",
+    "requesting",
+    "api_succeeded",
+    "fallback_running",
+    "parsed",
+    "embedded",
+}
+SUCCESSFUL_BATCH_STATES = {"committed", "recovered_by_fallback"}
+FINAL_BATCH_STATES = SUCCESSFUL_BATCH_STATES | {"failed_terminal"}
+FALLBACK_BATCH_STATES = {
+    "planned",
+    "requesting",
+    "api_succeeded",
+    "validated",
+    "committed",
+    "failed_retryable",
+    "failed_terminal",
+}
 
 
 def utc_now() -> str:
@@ -105,6 +122,26 @@ class ExtractionRunState:
             );
             CREATE INDEX IF NOT EXISTS idx_batches_run_status
                 ON batches(run_id, status);
+            CREATE TABLE IF NOT EXISTS fallback_batches (
+                fallback_batch_id TEXT PRIMARY KEY,
+                parent_batch_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                sample_id TEXT NOT NULL,
+                tier TEXT NOT NULL,
+                target_segment_id TEXT NOT NULL,
+                child_index INTEGER NOT NULL,
+                prompt_hash TEXT NOT NULL,
+                context_source_ids_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(parent_batch_id, target_segment_id),
+                FOREIGN KEY(parent_batch_id) REFERENCES batches(batch_id),
+                FOREIGN KEY(run_id) REFERENCES runs(run_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fallback_batches_parent
+                ON fallback_batches(parent_batch_id, status);
             """
         )
         self.connection.commit()
@@ -137,6 +174,17 @@ class ExtractionRunState:
                 "UPDATE batches SET status = ?, last_error = ?, updated_at = ? "
                 "WHERE run_id = ? AND status = ?",
                 ("failed_retryable", "recovered stale requesting state", now, self.run_id, "requesting"),
+            )
+            self.connection.execute(
+                "UPDATE fallback_batches SET status = ?, last_error = ?, updated_at = ? "
+                "WHERE run_id = ? AND status = ?",
+                (
+                    "failed_retryable",
+                    "recovered stale fallback requesting state",
+                    now,
+                    self.run_id,
+                    "requesting",
+                ),
             )
         self.connection.commit()
 
@@ -212,6 +260,112 @@ class ExtractionRunState:
             raise KeyError(batch_id)
         self.connection.commit()
 
+    def plan_fallback_batch(
+        self,
+        *,
+        fallback_batch_id: str,
+        parent_batch_id: str,
+        sample_id: str,
+        tier: str,
+        target_segment_id: str,
+        child_index: int,
+        prompt_hash: str,
+        context_source_ids: list[int],
+    ) -> str:
+        context_json = json.dumps(
+            context_source_ids, ensure_ascii=False, separators=(",", ":")
+        )
+        row = self.connection.execute(
+            "SELECT * FROM fallback_batches WHERE fallback_batch_id = ?",
+            (fallback_batch_id,),
+        ).fetchone()
+        if row is None:
+            now = utc_now()
+            self.connection.execute(
+                "INSERT INTO fallback_batches("
+                "fallback_batch_id, parent_batch_id, run_id, sample_id, tier, "
+                "target_segment_id, child_index, prompt_hash, context_source_ids_json, "
+                "status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    fallback_batch_id,
+                    parent_batch_id,
+                    self.run_id,
+                    sample_id,
+                    tier,
+                    target_segment_id,
+                    child_index,
+                    prompt_hash,
+                    context_json,
+                    "planned",
+                    now,
+                    now,
+                ),
+            )
+            self.connection.commit()
+            return "planned"
+        expected = (
+            parent_batch_id,
+            self.run_id,
+            sample_id,
+            tier,
+            target_segment_id,
+            child_index,
+            prompt_hash,
+            context_json,
+        )
+        actual = tuple(
+            row[key]
+            for key in (
+                "parent_batch_id",
+                "run_id",
+                "sample_id",
+                "tier",
+                "target_segment_id",
+                "child_index",
+                "prompt_hash",
+                "context_source_ids_json",
+            )
+        )
+        if actual != expected:
+            raise ValueError(
+                f"fallback batch plan changed while resuming {fallback_batch_id}"
+            )
+        return str(row["status"])
+
+    def mark_fallback(
+        self, fallback_batch_id: str, status: str, error: str | None = None
+    ) -> None:
+        if status not in FALLBACK_BATCH_STATES:
+            raise ValueError(f"unknown fallback batch status {status}")
+        result = self.connection.execute(
+            "UPDATE fallback_batches SET status = ?, last_error = ?, updated_at = ? "
+            "WHERE fallback_batch_id = ? AND run_id = ?",
+            (
+                status,
+                error[:2000] if error else None,
+                utc_now(),
+                fallback_batch_id,
+                self.run_id,
+            ),
+        )
+        if result.rowcount != 1:
+            raise KeyError(fallback_batch_id)
+        self.connection.commit()
+
+    def fallback_batch_ids(self, parent_batch_ids: list[str]) -> list[str]:
+        if not parent_batch_ids:
+            return []
+        placeholders = ",".join("?" for _ in parent_batch_ids)
+        return [
+            str(row["fallback_batch_id"])
+            for row in self.connection.execute(
+                "SELECT fallback_batch_id FROM fallback_batches "
+                f"WHERE run_id = ? AND parent_batch_id IN ({placeholders}) "
+                "ORDER BY parent_batch_id, child_index",
+                [self.run_id, *parent_batch_ids],
+            ).fetchall()
+        ]
+
     def retry_terminal(self, tiers: tuple[str, ...] | list[str] | None = None) -> int:
         selected = tuple(tiers or ())
         tier_clause = ""
@@ -219,11 +373,38 @@ class ExtractionRunState:
         if selected:
             tier_clause = f" AND tier IN ({','.join('?' for _ in selected)})"
             parameters.extend(selected)
+        terminal_parent_ids = [
+            str(row["batch_id"])
+            for row in self.connection.execute(
+                "SELECT batch_id FROM batches WHERE run_id = ? AND status = ?"
+                f"{tier_clause}",
+                [self.run_id, "failed_terminal", *selected],
+            ).fetchall()
+        ]
+        if terminal_parent_ids:
+            placeholders = ",".join("?" for _ in terminal_parent_ids)
+            exhausted = self.connection.execute(
+                "SELECT DISTINCT parent_batch_id FROM fallback_batches "
+                f"WHERE run_id = ? AND parent_batch_id IN ({placeholders})",
+                [self.run_id, *terminal_parent_ids],
+            ).fetchall()
+            if exhausted:
+                raise ValueError(
+                    "terminal singleton fallback is exhausted; create a new "
+                    "extraction run instead of retrying it"
+                )
         result = self.connection.execute(
             "UPDATE batches SET status = ?, last_error = NULL, updated_at = ? "
             f"WHERE run_id = ? AND status = ?{tier_clause}",
             parameters,
         )
+        if terminal_parent_ids:
+            placeholders = ",".join("?" for _ in terminal_parent_ids)
+            self.connection.execute(
+                "UPDATE fallback_batches SET status = ?, last_error = NULL, updated_at = ? "
+                f"WHERE run_id = ? AND parent_batch_id IN ({placeholders})",
+                ["failed_retryable", utc_now(), self.run_id, *terminal_parent_ids],
+            )
         self.connection.commit()
         return int(result.rowcount)
 

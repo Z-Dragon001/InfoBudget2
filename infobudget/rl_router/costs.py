@@ -70,6 +70,67 @@ def allocate_batch(
     return result
 
 
+def allocate_fallback_recovery(
+    parent_usage: ProviderUsage,
+    singleton_usage_by_segment: dict[str, ProviderUsage],
+    segment_ids: list[str],
+    content_token_weights: list[int],
+    fact_counts: list[int],
+    price: PriceSpec,
+) -> list[SegmentAllocation]:
+    """Allocate failed-parent usage by content weight, then add each child exactly."""
+    if not (
+        len(segment_ids) == len(content_token_weights) == len(fact_counts)
+    ):
+        raise ValueError("fallback allocation inputs must have equal lengths")
+    if set(singleton_usage_by_segment) != set(segment_ids):
+        raise ValueError("fallback allocation requires one singleton usage per segment")
+    parent_inputs = largest_remainder(
+        parent_usage.input_tokens, content_token_weights
+    )
+    parent_outputs = largest_remainder(
+        parent_usage.output_tokens, content_token_weights
+    )
+    weight_total = float(sum(content_token_weights))
+    result: list[SegmentAllocation] = []
+    for index, segment_id in enumerate(segment_ids):
+        child = singleton_usage_by_segment[segment_id]
+        weight = (
+            float(content_token_weights[index]) / weight_total
+            if weight_total
+            else 1.0 / len(segment_ids)
+        )
+        input_tokens = parent_inputs[index] + child.input_tokens
+        output_tokens = parent_outputs[index] + child.output_tokens
+        result.append(
+            SegmentAllocation(
+                segment_id=segment_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                input_cost=(
+                    (
+                        parent_usage.input_tokens * weight
+                        + child.input_tokens
+                    )
+                    * price.official_price_in_per_1m
+                    / 1_000_000
+                ),
+                output_cost=(
+                    (
+                        parent_usage.output_tokens * weight
+                        + child.output_tokens
+                    )
+                    * price.official_price_out_per_1m
+                    / 1_000_000
+                ),
+                fact_count=fact_counts[index],
+                serialized_input_tokens=content_token_weights[index],
+                attributed_output_tokens=child.output_tokens,
+            )
+        )
+    return result
+
+
 def replay_virtual_cost(
     segments: list[TopicSegment],
     actions: list[Tier],

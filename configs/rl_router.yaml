@@ -16,8 +16,8 @@ prompts:
   longmemeval_exact_match_judge: "judge_longmemeval_exact_match.txt"
 
 prompt_versions:
-  fact_extraction_locomo: "locomo_memory_extraction_batch_json_v10"
-  fact_extraction_longmemeval: "longmemeval_memory_extraction_batch_json_v7"
+  fact_extraction_locomo: "locomo_memory_extraction_batch_json_v11"
+  fact_extraction_longmemeval: "longmemeval_memory_extraction_batch_json_v8"
 
 extraction:
   max_facts_per_segment: 15
@@ -33,9 +33,19 @@ extraction:
     max_saturated_segment_rate: 0.10
     max_repair_batch_rate: 0.20
     max_failed_batch_rate: 0.0
+  terminal_fallback:
+    enabled: true
+    tiers: ["small"]
+    strategy: "failed_batch_to_singletons"
+    max_depth: 1
+    context_prefix_turns: 1
+    discard_primary_batch_output: true
+    require_all_children_committed: true
+    count_provider_usage: true
+    cost_allocation: "topic_content_token_weight"
   buffers:
     small: &buffer
-      max_segments: 3
+      max_segments: 6
       max_input_tokens: 16384
       max_total_context_tokens: 24576
     medium:

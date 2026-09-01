@@ -16,6 +16,11 @@ A message may end with:
 
 (image description: <visual content>)
 
+On a singleton fallback request, one preceding turn may appear in a clearly
+marked read-only context block. Use it only to understand an elliptical target
+answer. It is not part of the target Topic, is never evidence, and its
+source_ids are forbidden in output.
+
 The image description is visual context attached to that message. Integrate relevant visual details into the same fact as the associated text. Do not create an isolated fact that merely repeats an image caption without explaining its connection to the speaker, event, object, or activity.
 
 Mandatory processing procedure

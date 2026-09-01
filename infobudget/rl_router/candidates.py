@@ -17,7 +17,7 @@ from infobudget.rl_router.buffers import (
     build_tier_buffers,
     tier_config_int,
 )
-from infobudget.rl_router.costs import allocate_batch
+from infobudget.rl_router.costs import allocate_batch, allocate_fallback_recovery
 from infobudget.rl_router.embedding import Encoder
 from infobudget.rl_router.ledger import SqliteLedger, atomic_write_json
 from infobudget.rl_router.parsing import (
@@ -26,12 +26,14 @@ from infobudget.rl_router.parsing import (
     parse_fact_batch,
     render_extraction_prompt,
     render_json_repair_prompt,
+    render_singleton_fallback_prompt,
 )
 from infobudget.rl_router.qdrant_store import FactQdrantStore
 from infobudget.rl_router.run_state import ExtractionRunState, RunFileLock
 from infobudget.rl_router.schemas import (
     BatchCompletion,
     FactRecord,
+    ParsedBatch,
     ProviderUsage,
     SEGMENT_AUDIT_SCHEMA_VERSION,
     Tier,
@@ -268,6 +270,16 @@ class CandidateGenerationSummary:
     quality_metrics: dict[str, Any]
 
 
+@dataclass(slots=True)
+class _FallbackRecovery:
+    parsed: ParsedBatch
+    reason: str
+    child_batch_ids: dict[str, str]
+    context_source_ids: dict[str, list[int]]
+    child_usages: dict[str, ProviderUsage]
+    content_token_weights: dict[str, int]
+
+
 def estimate_candidate_plan(
     *,
     segments: list[TopicSegment],
@@ -390,6 +402,8 @@ class CandidateGenerator:
         self._state: ExtractionRunState | None = None
         self._fact_counts = {tier: 0 for tier in models}
         self._batch_counts = {tier: 0 for tier in models}
+        self._ordered_segments: list[TopicSegment] = []
+        self._segment_positions: dict[str, int] = {}
 
     def generate(
         self,
@@ -490,6 +504,10 @@ class CandidateGenerator:
         self._scope_hash = scope_hash
         self._fact_counts = {tier: 0 for tier in self.models}
         self._batch_counts = {tier: 0 for tier in self.models}
+        self._ordered_segments = list(segments)
+        self._segment_positions = {
+            segment.segment_id: index for index, segment in enumerate(segments)
+        }
         with RunFileLock(self._run_dir / "run.lock"):
             self._state = ExtractionRunState(self._run_dir, self._run_id)
             try:
@@ -500,8 +518,11 @@ class CandidateGenerator:
                     terminal_batch_ids = self._state.batch_ids(
                         "failed_terminal", selected_tiers
                     )
+                    fallback_batch_ids = self._state.fallback_batch_ids(
+                        terminal_batch_ids
+                    )
                     self._state.retry_terminal(selected_tiers)
-                    for batch_id in terminal_batch_ids:
+                    for batch_id in [*terminal_batch_ids, *fallback_batch_ids]:
                         self._selected_response_path(batch_id).unlink(missing_ok=True)
                 buffers = build_tier_buffers(
                     self.prompts,
@@ -516,10 +537,13 @@ class CandidateGenerator:
                 for buffer in buffers.values():
                     buffer.finalize()
                 state_summary = self._state.summary()
+                successful_states = {"committed", "recovered_by_fallback"}
                 complete = all(
                     state_summary["by_tier"].get(tier)
-                    and state_summary["by_tier"][tier].get("committed", 0)
-                    == sum(state_summary["by_tier"][tier].values())
+                    and sum(
+                        state_summary["by_tier"][tier].get(status, 0)
+                        for status in successful_states
+                    ) == sum(state_summary["by_tier"][tier].values())
                     for tier in selected_tiers
                 )
                 run_status = "complete" if complete else "incomplete"
@@ -578,7 +602,7 @@ class CandidateGenerator:
                 prompt_hash=prompt_hash,
             )
             batch_planned = True
-            if status in {"committed", "failed_terminal"}:
+            if status in {"committed", "recovered_by_fallback", "failed_terminal"}:
                 return
             max_new_tokens = batch_output_token_limit(
                 self.cfg, tier, len(segments), self.models[tier]
@@ -609,110 +633,162 @@ class CandidateGenerator:
                     error, "failed_terminal"
                 )
                 return
-            if _response_was_truncated(response):
-                error = f"model output was truncated: finish_reason={response.usage.finish_reason}"
-                self._state.mark(batch_id, "failed_terminal", error)
-                self._record_failure(
-                    failure_ledger, batch_id, sample_id, tier, segment_ids,
-                    error, "failed_terminal"
-                )
-                return
-
             expected_sources = {
                 segment.segment_id: _allowed_source_ids(segment)
                 for segment in segments
             }
             max_facts = tier_config_int(self.cfg, "max_facts_per_segment", tier)
-            repair_limit = int(self.cfg.get("schema_repair_max_attempts", 2))
-            repairs = 0
-            while True:
-                try:
-                    parsed = parse_fact_batch(
-                        response.content, segment_ids, max_facts, expected_sources
-                    )
-                    break
-                except ValueError as exc:
-                    if repairs >= repair_limit or not is_schema_repairable(exc):
-                        self._state.mark(batch_id, "failed_terminal", str(exc))
-                        self._record_failure(
-                            failure_ledger, batch_id, sample_id, tier, segment_ids,
-                            str(exc), "failed_terminal"
+            recovery: _FallbackRecovery | None = None
+            if _response_was_truncated(response):
+                error = (
+                    "model output was truncated: "
+                    f"finish_reason={response.usage.finish_reason}"
+                )
+                recovery = self._recover_with_singletons(
+                    tier=tier,
+                    sample_id=sample_id,
+                    parent_batch_id=batch_id,
+                    segments=segments,
+                    reason=error,
+                    failure_ledger=failure_ledger,
+                )
+                if recovery is None:
+                    return
+                parsed = recovery.parsed
+            else:
+                repair_limit = int(self.cfg.get("schema_repair_max_attempts", 2))
+                repairs = 0
+                while True:
+                    try:
+                        parsed = parse_fact_batch(
+                            response.content, segment_ids, max_facts, expected_sources
                         )
-                        return
-                    repairs += 1
-                    repair_prompt = render_json_repair_prompt(
-                        invalid_output=response.content,
-                        validation_error=str(exc),
-                        expected_segment_ids=segment_ids,
-                        expected_source_ids_by_segment=expected_sources,
-                        max_facts_per_segment=max_facts,
-                    )
-                    repair_input_tokens = self.token_counters[tier](repair_prompt)
-                    repair_max_new_tokens = min(
-                        max_new_tokens,
-                        self.models[tier].max_context_tokens - repair_input_tokens,
-                    )
-                    if repair_max_new_tokens <= 0:
-                        error = "schema repair prompt exceeds model context capacity"
-                        self._state.mark(batch_id, "failed_terminal", error)
-                        self._record_failure(
-                            failure_ledger, batch_id, sample_id, tier, segment_ids,
-                            error, "failed_terminal"
+                        break
+                    except ValueError as exc:
+                        fallback_cfg = self.cfg.get("terminal_fallback", {})
+                        fallback_now = (
+                            bool(fallback_cfg.get("enabled", False))
+                            and tier in tuple(fallback_cfg.get("tiers") or ())
+                            and len(segments) > 1
                         )
-                        return
-                    repaired = self._call_model(
-                        tier=tier,
-                        batch_id=batch_id,
-                        prompt=repair_prompt,
-                        max_new_tokens=repair_max_new_tokens,
-                        call_type="schema_repair",
-                    )
-                    if repaired is None:
-                        self._state.mark(
-                            batch_id, "failed_retryable", "schema repair request failed"
+                        if (
+                            fallback_now
+                            or repairs >= repair_limit
+                            or not is_schema_repairable(exc)
+                        ):
+                            recovery = self._recover_with_singletons(
+                                tier=tier,
+                                sample_id=sample_id,
+                                parent_batch_id=batch_id,
+                                segments=segments,
+                                reason=str(exc),
+                                failure_ledger=failure_ledger,
+                            )
+                            if recovery is None:
+                                return
+                            parsed = recovery.parsed
+                            break
+                        repairs += 1
+                        repair_prompt = render_json_repair_prompt(
+                            invalid_output=response.content,
+                            validation_error=str(exc),
+                            expected_segment_ids=segment_ids,
+                            expected_source_ids_by_segment=expected_sources,
+                            max_facts_per_segment=max_facts,
                         )
-                        self._record_failure(
-                            failure_ledger, batch_id, sample_id, tier, segment_ids,
-                            "schema repair request failed", "failed_retryable"
+                        repair_input_tokens = self.token_counters[tier](repair_prompt)
+                        repair_max_new_tokens = min(
+                            max_new_tokens,
+                            self.models[tier].max_context_tokens - repair_input_tokens,
                         )
-                        return
-                    response = repaired
-                    self._state.mark(batch_id, "api_succeeded")
-                    if not self._provider_usage_allowed(response):
-                        error = "provider usage is required but missing from schema repair"
-                        self._state.mark(batch_id, "failed_terminal", error)
-                        self._record_failure(
-                            failure_ledger, batch_id, sample_id, tier, segment_ids,
-                            error, "failed_terminal"
+                        if repair_max_new_tokens <= 0:
+                            error = "schema repair prompt exceeds model context capacity"
+                            self._state.mark(batch_id, "failed_terminal", error)
+                            self._record_failure(
+                                failure_ledger, batch_id, sample_id, tier, segment_ids,
+                                error, "failed_terminal"
+                            )
+                            return
+                        repaired = self._call_model(
+                            tier=tier,
+                            batch_id=batch_id,
+                            prompt=repair_prompt,
+                            max_new_tokens=repair_max_new_tokens,
+                            call_type="schema_repair",
                         )
-                        return
-                    if _response_was_truncated(response):
-                        error = (
-                            "schema repair output was truncated: "
-                            f"finish_reason={response.usage.finish_reason}"
-                        )
-                        self._state.mark(batch_id, "failed_terminal", error)
-                        self._record_failure(
-                            failure_ledger, batch_id, sample_id, tier, segment_ids,
-                            error, "failed_terminal"
-                        )
-                        return
+                        if repaired is None:
+                            self._state.mark(
+                                batch_id, "failed_retryable", "schema repair request failed"
+                            )
+                            self._record_failure(
+                                failure_ledger, batch_id, sample_id, tier, segment_ids,
+                                "schema repair request failed", "failed_retryable"
+                            )
+                            return
+                        response = repaired
+                        self._state.mark(batch_id, "api_succeeded")
+                        if not self._provider_usage_allowed(response):
+                            error = "provider usage is required but missing from schema repair"
+                            self._state.mark(batch_id, "failed_terminal", error)
+                            self._record_failure(
+                                failure_ledger, batch_id, sample_id, tier, segment_ids,
+                                error, "failed_terminal"
+                            )
+                            return
+                        if _response_was_truncated(response):
+                            error = (
+                                "schema repair output was truncated: "
+                                f"finish_reason={response.usage.finish_reason}"
+                            )
+                            recovery = self._recover_with_singletons(
+                                tier=tier,
+                                sample_id=sample_id,
+                                parent_batch_id=batch_id,
+                                segments=segments,
+                                reason=error,
+                                failure_ledger=failure_ledger,
+                            )
+                            if recovery is None:
+                                return
+                            parsed = recovery.parsed
+                            break
 
             self._state.mark(batch_id, "parsed")
-            usage = self._aggregate_batch_usage(batch_id, tier)
+            primary_usage = self._aggregate_batch_usage(batch_id, tier)
             input_weights = [self.token_counters[tier](segment.text) for segment in segments]
-            output_weights = [
-                self.token_counters[tier](parsed.block_text_by_segment[segment.segment_id])
+            fact_counts = [
+                len(parsed.facts_by_segment[segment.segment_id])
                 for segment in segments
             ]
-            allocations = allocate_batch(
-                usage,
-                segment_ids,
-                input_weights,
-                output_weights,
-                [len(parsed.facts_by_segment[segment.segment_id]) for segment in segments],
-                self.prices[tier],
-            )
+            if recovery is None:
+                usage = primary_usage
+                output_weights = [
+                    self.token_counters[tier](
+                        parsed.block_text_by_segment[segment.segment_id]
+                    )
+                    for segment in segments
+                ]
+                allocations = allocate_batch(
+                    usage,
+                    segment_ids,
+                    input_weights,
+                    output_weights,
+                    fact_counts,
+                    self.prices[tier],
+                )
+            else:
+                usage = _sum_provider_usage(
+                    [primary_usage, *recovery.child_usages.values()],
+                    self.models[tier].model_name,
+                )
+                allocations = allocate_fallback_recovery(
+                    primary_usage,
+                    recovery.child_usages,
+                    segment_ids,
+                    input_weights,
+                    fact_counts,
+                    self.prices[tier],
+                )
             facts: list[FactRecord] = []
             created_at = datetime.now(timezone.utc).isoformat()
             for segment, allocation in zip(segments, allocations):
@@ -763,6 +839,9 @@ class CandidateGenerator:
                                 **self._segment_audit_metadata(segment, tier),
                                 **_source_provenance(segment, source_ids),
                                 **_extraction_truncation_metadata(segment),
+                                **self._fallback_segment_metadata(
+                                    segment, batch_id, recovery
+                                ),
                             },
                         )
                     )
@@ -804,6 +883,9 @@ class CandidateGenerator:
             self._state.mark(batch_id, "embedded")
             price = self.prices[tier]
             attempts = self._batch_attempt_rows(batch_id)
+            if recovery is not None:
+                for child_batch_id in recovery.child_batch_ids.values():
+                    attempts.extend(self._batch_attempt_rows(child_batch_id))
             call_audit = _batch_call_audit(attempts)
             for segment, allocation in zip(segments, allocations):
                 fact_texts = parsed.facts_by_segment[segment.segment_id]
@@ -831,7 +913,12 @@ class CandidateGenerator:
                         "serialized_input_tokens": allocation.serialized_input_tokens,
                         "attributed_output_tokens": allocation.attributed_output_tokens,
                         "allocation_method": (
-                            "batch_usage_weighted_to_segment_then_equal_per_fact"
+                            "topic_content_token_weighted_parent_plus_singleton"
+                            if recovery is not None
+                            else "batch_usage_weighted_to_segment_then_equal_per_fact"
+                        ),
+                        **self._fallback_segment_metadata(
+                            segment, batch_id, recovery
                         ),
                         "fact_count": len(fact_texts),
                         "fact_limit": tier_config_int(
@@ -884,19 +971,76 @@ class CandidateGenerator:
                     "output_price_per_1m": price.official_price_out_per_1m,
                     "price_effective_date": price.price_effective_date,
                     "currency": price.currency,
-                    "logical_call_count": len({row["logical_call_index"] for row in attempts}),
+                    "logical_call_count": call_audit["logical_call_count"],
                     "repair_call_count": call_audit["repair_call_count"],
                     "transport_attempt_count": call_audit["transport_attempt_count"],
                     "retry_count": call_audit["retry_count"],
                     "latency_ms": call_audit["latency_ms"],
                     "unknown_cost_attempts": sum(row["cost_status"] == "unknown" for row in attempts),
-                    "status": "ok",
+                    "batch_kind": (
+                        "primary_with_singleton_fallback"
+                        if recovery is not None
+                        else "primary"
+                    ),
+                    "primary_input_tokens": primary_usage.input_tokens,
+                    "primary_output_tokens": primary_usage.output_tokens,
+                    "primary_total_tokens": primary_usage.total_tokens,
+                    "primary_total_cost": (
+                        primary_usage.input_tokens
+                        * price.official_price_in_per_1m
+                        + primary_usage.output_tokens
+                        * price.official_price_out_per_1m
+                    )
+                    / 1_000_000,
+                    "fallback_input_tokens": (
+                        sum(item.input_tokens for item in recovery.child_usages.values())
+                        if recovery is not None
+                        else 0
+                    ),
+                    "fallback_output_tokens": (
+                        sum(item.output_tokens for item in recovery.child_usages.values())
+                        if recovery is not None
+                        else 0
+                    ),
+                    "fallback_total_cost": (
+                        sum(
+                            item.input_tokens * price.official_price_in_per_1m
+                            + item.output_tokens * price.official_price_out_per_1m
+                            for item in recovery.child_usages.values()
+                        )
+                        / 1_000_000
+                        if recovery is not None
+                        else 0.0
+                    ),
+                    "fallback_child_batch_ids": (
+                        recovery.child_batch_ids if recovery is not None else {}
+                    ),
+                    "fallback_reason": recovery.reason if recovery is not None else "",
+                    "status": (
+                        "recovered_by_fallback" if recovery is not None else "ok"
+                    ),
                     "created_at": created_at,
                 }
             )
-            self._state.mark(batch_id, "committed")
+            if recovery is not None:
+                for child_batch_id in recovery.child_batch_ids.values():
+                    self._state.mark_fallback(child_batch_id, "committed")
+                self._state.mark(batch_id, "recovered_by_fallback")
+                self._record_failure(
+                    failure_ledger,
+                    batch_id,
+                    sample_id,
+                    tier,
+                    segment_ids,
+                    recovery.reason,
+                    "recovered_by_fallback",
+                )
+            else:
+                self._state.mark(batch_id, "committed")
         except ProviderCircuitOpenError as exc:
-            if self._state.status(batch_id) not in {"failed_terminal", "committed"}:
+            if self._state.status(batch_id) not in {
+                "failed_terminal", "committed", "recovered_by_fallback"
+            }:
                 self._state.mark(batch_id, "failed_terminal", str(exc))
             self._record_failure(
                 failure_ledger, batch_id, sample_id, tier, segment_ids,
@@ -904,7 +1048,9 @@ class CandidateGenerator:
             )
             raise
         except Exception as exc:
-            if self._state.status(batch_id) not in {"failed_terminal", "committed"}:
+            if self._state.status(batch_id) not in {
+                "failed_terminal", "committed", "recovered_by_fallback"
+            }:
                 self._state.mark(batch_id, "failed_retryable", str(exc))
             self._record_failure(
                 failure_ledger, batch_id, sample_id, tier, segment_ids,
@@ -914,7 +1060,7 @@ class CandidateGenerator:
             self._batch_counts[tier] += 1
             if batch_planned and self.progress_callback is not None:
                 final_status = self._state.status(batch_id)
-                if final_status == "committed" and progress_fact_count == 0:
+                if final_status in {"committed", "recovered_by_fallback"} and progress_fact_count == 0:
                     progress_fact_count = sum(
                         int(row.get("fact_count", 0))
                         for row in segment_ledger.read_all()
@@ -964,6 +1110,314 @@ class CandidateGenerator:
                         ),
                     }
                 )
+
+    def _recover_with_singletons(
+        self,
+        *,
+        tier: Tier,
+        sample_id: str,
+        parent_batch_id: str,
+        segments: list[TopicSegment],
+        reason: str,
+        failure_ledger: SqliteLedger,
+    ) -> _FallbackRecovery | None:
+        if self._state is None:
+            raise RuntimeError("candidate run state is not initialized")
+        fallback_cfg = self.cfg.get("terminal_fallback", {})
+        enabled_tiers = tuple(fallback_cfg.get("tiers") or ())
+        enabled = bool(fallback_cfg.get("enabled", False)) and tier in enabled_tiers
+        if not enabled or len(segments) <= 1:
+            self._state.mark(parent_batch_id, "failed_terminal", reason)
+            self._record_failure(
+                failure_ledger,
+                parent_batch_id,
+                sample_id,
+                tier,
+                [segment.segment_id for segment in segments],
+                reason,
+                "failed_terminal",
+            )
+            return None
+
+        self._state.mark(parent_batch_id, "fallback_running", reason)
+        self._record_failure(
+            failure_ledger,
+            parent_batch_id,
+            sample_id,
+            tier,
+            [segment.segment_id for segment in segments],
+            reason,
+            "fallback_started",
+        )
+        facts_by_segment: dict[str, list[str]] = {}
+        sources_by_segment: dict[str, list[list[int]]] = {}
+        blocks_by_segment: dict[str, str] = {}
+        child_batch_ids: dict[str, str] = {}
+        context_ids_by_segment: dict[str, list[int]] = {}
+        child_usages: dict[str, ProviderUsage] = {}
+        terminal_errors: list[str] = []
+        max_facts = tier_config_int(self.cfg, "max_facts_per_segment", tier)
+
+        for child_index, segment in enumerate(segments):
+            context_line, context_source_ids = self._preceding_context(segment)
+            fallback_prompt = render_singleton_fallback_prompt(
+                self.prompts[tier],
+                tier,
+                segment,
+                context_line=context_line,
+                context_source_ids=context_source_ids,
+            )
+            prompt_hash = hashlib.sha256(fallback_prompt.encode("utf-8")).hexdigest()
+            child_batch_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{parent_batch_id}:singleton:{segment.segment_id}:{prompt_hash}",
+                )
+            )
+            child_batch_ids[segment.segment_id] = child_batch_id
+            context_ids_by_segment[segment.segment_id] = context_source_ids
+            child_status = self._state.plan_fallback_batch(
+                fallback_batch_id=child_batch_id,
+                parent_batch_id=parent_batch_id,
+                sample_id=sample_id,
+                tier=tier,
+                target_segment_id=segment.segment_id,
+                child_index=child_index,
+                prompt_hash=prompt_hash,
+                context_source_ids=context_source_ids,
+            )
+            if child_status == "failed_terminal":
+                terminal_errors.append(
+                    f"{segment.segment_id}: existing terminal singleton failure"
+                )
+                continue
+
+            response = self._load_selected_response(child_batch_id)
+            if response is None:
+                input_tokens = self.token_counters[tier](fallback_prompt)
+                context_limit = min(
+                    self.models[tier].max_context_tokens,
+                    int(self.cfg["buffers"][tier]["max_total_context_tokens"]),
+                )
+                max_new_tokens = min(
+                    batch_output_token_limit(
+                        self.cfg, tier, 1, self.models[tier]
+                    ),
+                    context_limit - input_tokens,
+                )
+                if max_new_tokens <= 0:
+                    error = (
+                        "singleton fallback prompt exceeds total-context capacity: "
+                        f"{segment.segment_id}"
+                    )
+                    self._state.mark_fallback(
+                        child_batch_id, "failed_terminal", error
+                    )
+                    self._record_failure(
+                        failure_ledger,
+                        child_batch_id,
+                        sample_id,
+                        tier,
+                        [segment.segment_id],
+                        error,
+                        "failed_terminal",
+                    )
+                    terminal_errors.append(error)
+                    continue
+                self._state.mark_fallback(child_batch_id, "requesting")
+                try:
+                    response = self._call_model(
+                        tier=tier,
+                        batch_id=child_batch_id,
+                        prompt=fallback_prompt,
+                        max_new_tokens=max_new_tokens,
+                        call_type="fallback_singleton",
+                    )
+                except ProviderCircuitOpenError as exc:
+                    self._state.mark_fallback(
+                        child_batch_id, "failed_terminal", str(exc)
+                    )
+                    self._record_failure(
+                        failure_ledger,
+                        child_batch_id,
+                        sample_id,
+                        tier,
+                        [segment.segment_id],
+                        str(exc),
+                        "failed_terminal",
+                    )
+                    raise
+                if response is None:
+                    error = f"singleton fallback request failed: {segment.segment_id}"
+                    self._state.mark_fallback(
+                        child_batch_id, "failed_retryable", error
+                    )
+                    self._state.mark(parent_batch_id, "failed_retryable", error)
+                    self._record_failure(
+                        failure_ledger,
+                        child_batch_id,
+                        sample_id,
+                        tier,
+                        [segment.segment_id],
+                        error,
+                        "failed_retryable",
+                    )
+                    return None
+                self._state.mark_fallback(child_batch_id, "api_succeeded")
+
+            error = ""
+            if not self._provider_usage_allowed(response):
+                error = (
+                    "provider usage is required but missing from singleton fallback: "
+                    f"{segment.segment_id}"
+                )
+            elif _response_was_truncated(response):
+                error = (
+                    "singleton fallback output was truncated: "
+                    f"{segment.segment_id} finish_reason={response.usage.finish_reason}"
+                )
+            if error:
+                self._state.mark_fallback(child_batch_id, "failed_terminal", error)
+                self._record_failure(
+                    failure_ledger,
+                    child_batch_id,
+                    sample_id,
+                    tier,
+                    [segment.segment_id],
+                    error,
+                    "failed_terminal",
+                )
+                terminal_errors.append(error)
+                continue
+            try:
+                parsed = parse_fact_batch(
+                    response.content,
+                    [segment.segment_id],
+                    max_facts,
+                    {segment.segment_id: _allowed_source_ids(segment)},
+                )
+            except ValueError as exc:
+                error = f"singleton fallback validation failed: {exc}"
+                self._state.mark_fallback(child_batch_id, "failed_terminal", error)
+                self._record_failure(
+                    failure_ledger,
+                    child_batch_id,
+                    sample_id,
+                    tier,
+                    [segment.segment_id],
+                    error,
+                    "failed_terminal",
+                )
+                terminal_errors.append(error)
+                continue
+            self._state.mark_fallback(child_batch_id, "validated")
+            facts_by_segment[segment.segment_id] = parsed.facts_by_segment[
+                segment.segment_id
+            ]
+            sources_by_segment[segment.segment_id] = parsed.source_ids_by_segment[
+                segment.segment_id
+            ]
+            blocks_by_segment[segment.segment_id] = parsed.block_text_by_segment[
+                segment.segment_id
+            ]
+            child_usages[segment.segment_id] = self._aggregate_batch_usage(
+                child_batch_id, tier
+            )
+
+        if terminal_errors:
+            error = "singleton fallback failed: " + " | ".join(terminal_errors)
+            self._state.mark(parent_batch_id, "failed_terminal", error)
+            self._record_failure(
+                failure_ledger,
+                parent_batch_id,
+                sample_id,
+                tier,
+                [segment.segment_id for segment in segments],
+                error,
+                "failed_terminal",
+            )
+            return None
+        expected_ids = {segment.segment_id for segment in segments}
+        if set(facts_by_segment) != expected_ids:
+            error = "singleton fallback did not validate every parent Topic"
+            self._state.mark(parent_batch_id, "failed_terminal", error)
+            self._record_failure(
+                failure_ledger,
+                parent_batch_id,
+                sample_id,
+                tier,
+                [segment.segment_id for segment in segments],
+                error,
+                "failed_terminal",
+            )
+            return None
+        return _FallbackRecovery(
+            parsed=ParsedBatch(
+                facts_by_segment,
+                sources_by_segment,
+                blocks_by_segment,
+            ),
+            reason=reason,
+            child_batch_ids=child_batch_ids,
+            context_source_ids=context_ids_by_segment,
+            child_usages=child_usages,
+            content_token_weights={
+                segment.segment_id: self.token_counters[tier](segment.text)
+                for segment in segments
+            },
+        )
+
+    def _preceding_context(self, segment: TopicSegment) -> tuple[str, list[int]]:
+        position = self._segment_positions.get(segment.segment_id)
+        if position is None or position <= 0:
+            return "", []
+        previous = self._ordered_segments[position - 1]
+        if previous.session_id != segment.session_id:
+            return "", []
+        for line in reversed(previous.text.splitlines()):
+            stripped = line.strip()
+            match = SOURCE_LINE_PATTERN.match(stripped)
+            if match is not None:
+                return stripped, [int(match.group("source_id"))]
+        return "", []
+
+    def _fallback_segment_metadata(
+        self,
+        segment: TopicSegment,
+        parent_batch_id: str,
+        recovery: _FallbackRecovery | None,
+    ) -> dict[str, Any]:
+        if recovery is None:
+            return {
+                "batch_kind": "primary",
+                "fallback_depth": 0,
+                "parent_batch_id": "",
+                "fallback_child_batch_id": "",
+                "fallback_reason": "",
+                "context_only_source_ids": [],
+            }
+        total_content_tokens = sum(recovery.content_token_weights.values())
+        if total_content_tokens:
+            primary_cost_weight = (
+                recovery.content_token_weights[segment.segment_id]
+                / total_content_tokens
+            )
+        else:
+            primary_cost_weight = 1.0 / len(recovery.content_token_weights)
+        return {
+            "batch_kind": "singleton_fallback",
+            "fallback_depth": 1,
+            "parent_batch_id": parent_batch_id,
+            "fallback_child_batch_id": recovery.child_batch_ids[segment.segment_id],
+            "fallback_reason": recovery.reason,
+            "context_only_source_ids": recovery.context_source_ids[segment.segment_id],
+            "fallback_cost_allocation_method": "topic_content_token_weight",
+            "primary_content_tokens": recovery.content_token_weights[
+                segment.segment_id
+            ],
+            "primary_content_token_total": total_content_tokens,
+            "primary_cost_weight": primary_cost_weight,
+        }
 
     def _segment_audit_metadata(
         self, segment: TopicSegment, tier: Tier
@@ -1264,12 +1718,38 @@ class CandidateGenerator:
             by_tier[tier]["total_tokens"] = (
                 by_tier[tier]["input_tokens"] + by_tier[tier]["output_tokens"]
             )
+            fallback_rows = [
+                row for row in tier_rows
+                if row.get("call_type") == "fallback_singleton"
+            ]
+            repair_rows = [
+                row for row in tier_rows
+                if row.get("call_type") == "schema_repair"
+            ]
+            by_tier[tier]["fallback_calls"] = len(
+                {
+                    (row.get("batch_id"), row.get("logical_call_index"))
+                    for row in fallback_rows
+                }
+            )
+            by_tier[tier]["fallback_cost"] = _known_attempt_cost(fallback_rows)
+            by_tier[tier]["schema_repair_cost"] = _known_attempt_cost(repair_rows)
+            by_tier[tier]["primary_cost"] = (
+                by_tier[tier]["known_cost"] - by_tier[tier]["fallback_cost"]
+            )
+        fallback_rows = [
+            row for row in rows if row.get("call_type") == "fallback_singleton"
+        ]
+        repair_rows = [
+            row for row in rows if row.get("call_type") == "schema_repair"
+        ]
+        known_cost = _known_attempt_cost(rows)
+        fallback_cost = _known_attempt_cost(fallback_rows)
         return {
-            "known_cost": sum(
-                float(row.get("input_cost") or 0.0) + float(row.get("output_cost") or 0.0)
-                for row in rows
-                if row.get("cost_status") in {"known", "estimated"}
-            ),
+            "known_cost": known_cost,
+            "primary_cost": known_cost - fallback_cost,
+            "fallback_cost": fallback_cost,
+            "schema_repair_cost": _known_attempt_cost(repair_rows),
             "unknown_cost_attempts": sum(row.get("cost_status") == "unknown" for row in rows),
             "successful_attempts": sum(row.get("status") == "succeeded" for row in rows),
             "failed_attempts": sum(row.get("status") == "failed" for row in rows),
@@ -1290,6 +1770,12 @@ class CandidateGenerator:
                 {
                     (row.get("batch_id"), row.get("logical_call_index"))
                     for row in rows if row.get("call_type") == "schema_repair"
+                }
+            ),
+            "fallback_calls": len(
+                {
+                    (row.get("batch_id"), row.get("logical_call_index"))
+                    for row in fallback_rows
                 }
             ),
         }
@@ -1334,10 +1820,14 @@ class CandidateGenerator:
             }
         )
         total_batches = int(state_summary.get("batch_count", 0))
+        successful_states = {"committed", "recovered_by_fallback"}
         failed_batches = sum(
             count
             for status, count in state_summary.get("by_status", {}).items()
-            if status != "committed"
+            if status not in successful_states
+        )
+        recovered_batches = int(
+            state_summary.get("by_status", {}).get("recovered_by_fallback", 0)
         )
 
         def rate(numerator: int, denominator: int) -> float:
@@ -1350,10 +1840,12 @@ class CandidateGenerator:
             "total_batches": total_batches,
             "repair_batches": repair_batches,
             "failed_batches": failed_batches,
+            "recovered_by_fallback_batches": recovered_batches,
             "empty_fact_segment_rate": rate(empty_segments, total_segment_results),
             "saturated_segment_rate": rate(saturated_segments, total_segment_results),
             "repair_batch_rate": rate(repair_batches, total_batches),
             "failed_batch_rate": rate(failed_batches, total_batches),
+            "fallback_recovery_rate": rate(recovered_batches, total_batches),
         }
         gates = self.cfg.get("quality_gates", {})
         comparisons = {
@@ -1433,10 +1925,11 @@ class CandidateGenerator:
 
 def _batch_call_audit(attempts: list[dict[str, Any]]) -> dict[str, Any]:
     logical_calls = {
-        int(row.get("logical_call_index", 0)) for row in attempts
+        (str(row.get("batch_id") or ""), int(row.get("logical_call_index", 0)))
+        for row in attempts
     }
     repair_calls = {
-        int(row.get("logical_call_index", 0))
+        (str(row.get("batch_id") or ""), int(row.get("logical_call_index", 0)))
         for row in attempts
         if row.get("call_type") == "schema_repair"
     }
@@ -1458,6 +1951,33 @@ def _batch_call_audit(attempts: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "provider_request_ids": request_ids,
     }
+
+
+def _sum_provider_usage(
+    usages: list[ProviderUsage], model_name: str
+) -> ProviderUsage:
+    if not usages:
+        raise ValueError("cannot sum an empty usage list")
+    sources = {usage.usage_source for usage in usages}
+    return ProviderUsage(
+        input_tokens=sum(usage.input_tokens for usage in usages),
+        output_tokens=sum(usage.output_tokens for usage in usages),
+        model_name=model_name,
+        usage_source="provider" if sources == {"provider"} else "mixed_estimate",
+        retry_count=sum(usage.retry_count for usage in usages),
+        latency_ms=sum(usage.latency_ms for usage in usages),
+        provider_request_id=usages[-1].provider_request_id,
+        finish_reason=usages[-1].finish_reason,
+    )
+
+
+def _known_attempt_cost(rows: list[dict[str, Any]]) -> float:
+    return sum(
+        float(row.get("input_cost") or 0.0)
+        + float(row.get("output_cost") or 0.0)
+        for row in rows
+        if row.get("cost_status") in {"known", "estimated"}
+    )
 
 
 def _scope_hash(

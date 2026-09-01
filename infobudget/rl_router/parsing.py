@@ -68,6 +68,36 @@ def render_extraction_prompt(template: str, tier: Tier, segments: list[TopicSegm
     return rendered.replace(legacy_placeholder, render_batch(segments))
 
 
+def render_singleton_fallback_prompt(
+    template: str,
+    tier: Tier,
+    segment: TopicSegment,
+    *,
+    context_line: str = "",
+    context_source_ids: list[int] | None = None,
+) -> str:
+    """Render one target topic plus a preceding turn that can never be cited."""
+    rendered = render_extraction_prompt(template, tier, [segment])
+    source_ids = list(context_source_ids or [])
+    context = context_line.strip() or "(no preceding turn available)"
+    rules = (
+        "FALLBACK SINGLETON EXTRACTION\n"
+        "Process exactly the one target Topic in this request.\n"
+        "The preceding turn below is read-only context for resolving the target's "
+        "meaning. It is not part of the target Topic, is not evidence, and none of "
+        "its source_ids may appear in output.\n"
+        f"Context-only source_ids (forbidden in output): "
+        f"{json.dumps(source_ids, ensure_ascii=False)}\n"
+        "--- Read-only preceding turn ---\n"
+        f"{context}\n"
+        "--- End read-only preceding turn ---\n\n"
+    )
+    marker = "Topic segments to process:\n"
+    if marker in rendered:
+        return rendered.replace(marker, f"{rules}{marker}", 1)
+    return f"{rules}{rendered}"
+
+
 def parse_fact_batch(
     content: str,
     expected_segment_ids: list[str],

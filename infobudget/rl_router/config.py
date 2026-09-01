@@ -110,6 +110,38 @@ def load_rl_bundle(config_dir: str | Path = "configs") -> RLConfigBundle:
         value = float(quality_gates.get(key, 0.0))
         if not 0.0 <= value <= 1.0:
             raise ValueError(f"extraction.quality_gates.{key} must be between 0 and 1")
+    fallback = extraction.get("terminal_fallback", {})
+    if fallback:
+        if str(fallback.get("strategy")) != "failed_batch_to_singletons":
+            raise ValueError(
+                "extraction.terminal_fallback.strategy must be "
+                "failed_batch_to_singletons"
+            )
+        tiers = tuple(fallback.get("tiers") or ())
+        if not tiers or any(tier not in {"small", "medium", "large"} for tier in tiers):
+            raise ValueError(
+                "extraction.terminal_fallback.tiers must contain known model tiers"
+            )
+        if int(fallback.get("max_depth", 1)) != 1:
+            raise ValueError("extraction.terminal_fallback.max_depth must be 1")
+        if int(fallback.get("context_prefix_turns", 1)) != 1:
+            raise ValueError(
+                "extraction.terminal_fallback.context_prefix_turns must be 1"
+            )
+        if str(fallback.get("cost_allocation")) != "topic_content_token_weight":
+            raise ValueError(
+                "extraction.terminal_fallback.cost_allocation must be "
+                "topic_content_token_weight"
+            )
+        for required_flag in (
+            "discard_primary_batch_output",
+            "require_all_children_committed",
+            "count_provider_usage",
+        ):
+            if fallback.get(required_flag) is not True:
+                raise ValueError(
+                    f"extraction.terminal_fallback.{required_flag} must be true"
+                )
     for tier in ("small", "medium", "large"):
         spec = project.models[tier]
         if spec.max_output_tokens <= 0 or spec.max_output_tokens >= spec.max_context_tokens:

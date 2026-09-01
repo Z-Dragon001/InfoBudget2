@@ -37,7 +37,19 @@ def test_api_roles_have_credentials_and_known_price_scopes() -> None:
     buffers = rl_bundle.rl["extraction"]["buffers"]
     assert {
         tier: values["max_segments"] for tier, values in buffers.items()
-    } == {"small": 3, "medium": 6, "large": 6}
+    } == {"small": 6, "medium": 6, "large": 6}
+    fallback = rl_bundle.rl["extraction"]["terminal_fallback"]
+    assert fallback == {
+        "enabled": True,
+        "tiers": ["small"],
+        "strategy": "failed_batch_to_singletons",
+        "max_depth": 1,
+        "context_prefix_turns": 1,
+        "discard_primary_batch_output": True,
+        "require_all_children_committed": True,
+        "count_provider_usage": True,
+        "cost_allocation": "topic_content_token_weight",
+    }
     assert {
         (values["max_input_tokens"], values["max_total_context_tokens"])
         for values in buffers.values()
@@ -85,8 +97,8 @@ def test_api_roles_have_credentials_and_known_price_scopes() -> None:
         assert '"source_ids"' in prompt
         assert '"fact"' in prompt
         assert "external knowledge" in prompt
-    assert rl_bundle.fact_extraction_prompt_version("locomo").endswith("_v10")
-    assert rl_bundle.fact_extraction_prompt_version("longmemeval").endswith("_v7")
+    assert rl_bundle.fact_extraction_prompt_version("locomo").endswith("_v11")
+    assert rl_bundle.fact_extraction_prompt_version("longmemeval").endswith("_v8")
     assert "Personal Information and Fact Extractor" in extraction_prompts["locomo"]
     assert "temporary states" in extraction_prompts["locomo"]
     assert "{segment_text_with_source_constraints}" in extraction_prompts["locomo"]

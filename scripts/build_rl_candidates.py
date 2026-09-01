@@ -342,12 +342,16 @@ def main() -> None:
             tier: qdrant_counts[tier] == summary.fact_counts[tier] for tier in models
         }
         completed_tiers = []
+        successful_batch_statuses = {"committed", "recovered_by_fallback"}
         for tier in TIERS:
             plan = planned_extraction.get(tier)
             statuses = summary.batch_status_by_tier.get(tier, {})
             if (
                 plan
-                and statuses.get("committed", 0) == int(plan["batch_count"])
+                and sum(
+                    statuses.get(status, 0)
+                    for status in successful_batch_statuses
+                ) == int(plan["batch_count"])
                 and sum(statuses.values()) == int(plan["batch_count"])
                 and qdrant_reconciled_by_tier[tier]
             ):
@@ -358,7 +362,7 @@ def main() -> None:
         if set(completed_tiers) == set(TIERS):
             final_status = "complete"
         elif any(
-            status != "committed"
+            status not in successful_batch_statuses
             for tier_statuses in summary.batch_status_by_tier.values()
             for status in tier_statuses
         ):

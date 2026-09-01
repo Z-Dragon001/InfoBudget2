@@ -82,10 +82,13 @@ def reconcile_extraction_run(
 
     for tier in required_tiers:
         tier_state = [row for row in state_rows if row["tier"] == tier]
-        committed_state = [row for row in tier_state if row["status"] == "committed"]
+        successful_statuses = {"committed", "recovered_by_fallback"}
+        committed_state = [
+            row for row in tier_state if row["status"] in successful_statuses
+        ]
         non_committed = sorted(
             f"{row['batch_id']}={row['status']}"
-            for row in tier_state if row["status"] != "committed"
+            for row in tier_state if row["status"] not in successful_statuses
         )
         tier_ledger = [row for row in ledger_rows if row.get("tier") == tier]
         if manifest.get("qdrant_point_schema_version") == QDRANT_FACT_SCHEMA_VERSION:
@@ -129,8 +132,9 @@ def reconcile_extraction_run(
         state_batches = {row["batch_id"] for row in committed_state}
         ledger_batches = {str(row.get("batch_id") or "") for row in tier_ledger}
         plan_count = int((planned.get(tier) or {}).get("batch_count", 0))
-        manifest_committed = int(
-            (summary_statuses.get(tier) or {}).get("committed", 0)
+        manifest_committed = sum(
+            int((summary_statuses.get(tier) or {}).get(status, 0))
+            for status in successful_statuses
         )
         if non_committed:
             errors.append(f"{tier}: SQLite contains non-committed batches: {non_committed}")
