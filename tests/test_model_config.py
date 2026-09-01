@@ -82,10 +82,12 @@ def test_api_roles_have_credentials_and_known_price_scopes() -> None:
         assert '"source_ids"' in prompt
         assert '"fact"' in prompt
         assert "external knowledge" in prompt
-    assert rl_bundle.fact_extraction_prompt_version("locomo").endswith("_v8")
+    assert rl_bundle.fact_extraction_prompt_version("locomo").endswith("_v9")
     assert rl_bundle.fact_extraction_prompt_version("longmemeval").endswith("_v7")
     assert "Personal Information and Fact Extractor" in extraction_prompts["locomo"]
     assert "temporary states" in extraction_prompts["locomo"]
+    assert "{segment_text_with_source_constraints}" in extraction_prompts["locomo"]
+    assert "Allowed source_ids for this topic only" in extraction_prompts["locomo"]
     assert "Knowledge updates" in extraction_prompts["longmemeval"]
     assert "Abstention support" in extraction_prompts["longmemeval"]
     assert set(rl_bundle.rl["prompts"]) == {

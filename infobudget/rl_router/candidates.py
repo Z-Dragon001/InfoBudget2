@@ -21,6 +21,7 @@ from infobudget.rl_router.costs import allocate_batch
 from infobudget.rl_router.embedding import Encoder
 from infobudget.rl_router.ledger import SqliteLedger, atomic_write_json
 from infobudget.rl_router.parsing import (
+    allowed_source_ids,
     is_schema_repairable,
     parse_fact_batch,
     render_extraction_prompt,
@@ -1511,9 +1512,7 @@ def _visible_source_ids(text: str) -> tuple[int, ...]:
 
 
 def _allowed_source_ids(segment: TopicSegment) -> set[int]:
-    if segment.extraction_truncated:
-        return set(segment.extraction_visible_source_ids)
-    return {turn_id - 1 for turn_id in segment.turn_ids}
+    return set(allowed_source_ids(segment))
 
 
 def _dropped_source_ids(segment: TopicSegment) -> list[int]:

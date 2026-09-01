@@ -16,7 +16,7 @@ prompts:
   longmemeval_exact_match_judge: "judge_longmemeval_exact_match.txt"
 
 prompt_versions:
-  fact_extraction_locomo: "locomo_memory_extraction_batch_json_v8"
+  fact_extraction_locomo: "locomo_memory_extraction_batch_json_v9"
   fact_extraction_longmemeval: "longmemeval_memory_extraction_batch_json_v7"
 
 extraction:

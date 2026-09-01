@@ -6,7 +6,10 @@ Input format
 ------------
 The input contains one or more topic segments:
 
+Required processed_segment_ids in exact output order: ["<segment_id>"]
+
 --- Topic <segment_id> ---
+Allowed source_ids for this topic only: [<source_id>, ...]
 [timestamp, weekday] <source_id>.<SpeakerName>: <message>
 
 A message may end with:
@@ -95,10 +98,13 @@ Output contract
 Return exactly one valid JSON object and nothing else. Do not use Markdown fences or explanatory text.
 
 - processed_segment_ids must contain every input segment_id exactly once and in the exact input order, including segments for which no facts are extracted.
+- The Required processed_segment_ids line in the input is authoritative. Copy that complete JSON array verbatim; do not reconstruct it from topics that produced facts.
+- A topic with zero extracted facts must still appear in processed_segment_ids and must simply have no corresponding data item.
 - Every data item must contain exactly segment_id, source_ids, and fact.
 - segment_id must exactly match the topic identifier that supplied the fact.
 - source_ids must be a non-empty JSON array of unique integers in ascending order.
-- Every source_id must belong to that segment and must directly support the fact.
+- Every source_id must appear in that topic's Allowed source_ids list and must directly support the fact.
+- Never copy a source_id from an adjacent topic, infer an unlisted ID from numerical proximity, or replace an invalid ID with a guessed boundary value.
 - fact must be one non-empty standalone sentence.
 
 Required schema:
@@ -116,7 +122,10 @@ Required schema:
 
 Example
 -------
+Required processed_segment_ids in exact output order: ["locomo-example-1", "locomo-example-2"]
+
 --- Topic locomo-example-1 ---
+Allowed source_ids for this topic only: [0, 1, 2, 3, 4]
 [2024-01-07T17:24:00.000, Sun] 0.Tim: Hey John! Next month I'm off to Ireland for a semester in Galway.
 [2024-01-07T17:24:01.000, Sun] 1.John: That's awesome! Where will you stay?
 [2024-01-07T17:24:02.000, Sun] 2.Tim: In Galway. I also want to visit The Cliffs of Moher.
@@ -124,6 +133,7 @@ Example
 [2024-01-07T17:24:04.000, Sun] 4.Tim: I'm currently reading "The Name of the Wind" by Patrick Rothfuss.
 
 --- Topic locomo-example-2 ---
+Allowed source_ids for this topic only: [6, 7, 8, 9]
 [2024-01-12T13:41:00.000, Fri] 6.John: I got an endorsement with a beverage company last week.
 [2024-01-12T13:41:01.000, Fri] 7.Tim: Congratulations!
 [2024-01-12T13:41:02.000, Fri] 8.John: Barcelona is a must-visit city in my opinion.
@@ -177,9 +187,10 @@ Example
 
 Final checklist before responding
 ---------------------------------
-- Every input segment_id is present in processed_segment_ids in exact order.
+- processed_segment_ids exactly copies the complete Required processed_segment_ids array, including topics with zero facts.
 - Every message was considered.
 - Facts are directly supported, specific, standalone, and non-duplicative.
+- Every source_id occurs in the Allowed source_ids list for its own topic; no source_id was borrowed or guessed from another topic.
 - Relative time, uncertainty, changes, and speaker attribution are preserved.
 - Questions and acknowledgements are not incorrectly cited as evidence.
 - Image details are integrated only when relevant.
@@ -191,4 +202,4 @@ InfoBudget routing metadata:
 - information_score: {information_score}
 
 Topic segments to process:
-{segment_text}
+{segment_text_with_source_constraints}

@@ -383,6 +383,33 @@ def test_legacy_prompt_placeholders_render_without_formatting_json_braces() -> N
     assert "{segment_text}" not in rendered
 
 
+def test_constrained_prompt_renders_exact_batch_and_topic_source_contracts() -> None:
+    template = (
+        '{"data": []}\nrouter={router_level}\nscore={information_score}\n'
+        "Topic segments:\n{segment_text_with_source_constraints}"
+    )
+    first = _segment(1)
+    second = replace(
+        _segment(2),
+        turn_ids=(8, 10),
+        extraction_truncated=True,
+        extraction_visible_source_ids=(7, 9),
+    )
+
+    rendered = render_extraction_prompt(template, "small", [first, second])
+
+    assert '{"data": []}' in rendered
+    assert (
+        "Required processed_segment_ids in exact output order: "
+        '["sample-1:nsp_text_tiling:seg_000001", '
+        '"sample-1:nsp_text_tiling:seg_000002"]'
+    ) in rendered
+    assert "Allowed source_ids for this topic only: [0]" in rendered
+    assert "Allowed source_ids for this topic only: [7, 9]" in rendered
+    assert rendered.index(first.segment_id) < rendered.index(second.segment_id)
+    assert "{segment_text_with_source_constraints}" not in rendered
+
+
 def test_buffer_flushes_and_never_mixes_samples() -> None:
     batches = []
     template = "{router_level} {information_score}\n{segment_text}"

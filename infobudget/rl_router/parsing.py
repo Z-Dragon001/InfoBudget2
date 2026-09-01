@@ -14,17 +14,58 @@ def render_batch(segments: list[TopicSegment]) -> str:
     )
 
 
+def allowed_source_ids(segment: TopicSegment) -> tuple[int, ...]:
+    """Return the exact source IDs the parser will accept for one rendered topic."""
+    if segment.extraction_truncated:
+        return tuple(segment.extraction_visible_source_ids)
+    return tuple(turn_id - 1 for turn_id in segment.turn_ids)
+
+
+def render_constrained_batch(segments: list[TopicSegment]) -> str:
+    """Render LoCoMo v9 topics with explicit batch- and topic-level constraints."""
+    expected_segment_ids = [segment.segment_id for segment in segments]
+    topics = "\n\n".join(
+        "\n".join(
+            (
+                f"--- Topic {segment.segment_id} ---",
+                "Allowed source_ids for this topic only: "
+                f"{json.dumps(list(allowed_source_ids(segment)), ensure_ascii=False)}",
+                segment.text,
+            )
+        )
+        for segment in segments
+    )
+    return (
+        "Required processed_segment_ids in exact output order: "
+        f"{json.dumps(expected_segment_ids, ensure_ascii=False)}\n\n"
+        f"{topics}"
+    )
+
+
 def render_extraction_prompt(template: str, tier: Tier, segments: list[TopicSegment]) -> str:
-    """Replace only legacy placeholders so JSON braces remain untouched."""
-    required = ("{router_level}", "{information_score}", "{segment_text}")
+    """Replace supported placeholders without formatting literal JSON braces."""
+    required = ("{router_level}", "{information_score}")
     missing = [placeholder for placeholder in required if placeholder not in template]
     if missing:
         raise ValueError(f"extraction prompt is missing placeholders: {missing}")
-    return (
+    legacy_placeholder = "{segment_text}"
+    constrained_placeholder = "{segment_text_with_source_constraints}"
+    present_segment_placeholders = [
+        placeholder
+        for placeholder in (legacy_placeholder, constrained_placeholder)
+        if placeholder in template
+    ]
+    if len(present_segment_placeholders) != 1:
+        raise ValueError(
+            "extraction prompt must contain exactly one segment-text placeholder"
+        )
+    rendered = (
         template.replace("{router_level}", tier)
         .replace("{information_score}", "N/A (frozen candidate generation)")
-        .replace("{segment_text}", render_batch(segments))
     )
+    if present_segment_placeholders[0] == constrained_placeholder:
+        return rendered.replace(constrained_placeholder, render_constrained_batch(segments))
+    return rendered.replace(legacy_placeholder, render_batch(segments))
 
 
 def parse_fact_batch(
