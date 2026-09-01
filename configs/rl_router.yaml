@@ -16,7 +16,7 @@ prompts:
   longmemeval_exact_match_judge: "judge_longmemeval_exact_match.txt"
 
 prompt_versions:
-  fact_extraction_locomo: "locomo_memory_extraction_batch_json_v9"
+  fact_extraction_locomo: "locomo_memory_extraction_batch_json_v10"
   fact_extraction_longmemeval: "longmemeval_memory_extraction_batch_json_v7"
 
 extraction:
@@ -35,13 +35,15 @@ extraction:
     max_failed_batch_rate: 0.0
   buffers:
     small: &buffer
-      max_segments: 6
+      max_segments: 3
       max_input_tokens: 16384
       max_total_context_tokens: 24576
     medium:
       <<: *buffer
+      max_segments: 6
     large:
       <<: *buffer
+      max_segments: 6
 
 api_reliability:
   timeout_seconds: 300

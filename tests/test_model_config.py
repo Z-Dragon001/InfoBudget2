@@ -34,11 +34,14 @@ def test_api_roles_have_credentials_and_known_price_scopes() -> None:
     assert rl_bundle.rl["extraction"]["allow_oversize_singleton"] is True
     assert rl_bundle.rl["extraction"]["truncate_over_total_context"] is True
     assert rl_bundle.rl["extraction"]["quality_gates"]["max_failed_batch_rate"] == 0.0
-    assert len({tuple(values.items()) for values in rl_bundle.rl["extraction"]["buffers"].values()}) == 1
+    buffers = rl_bundle.rl["extraction"]["buffers"]
     assert {
-        values["max_segments"]
-        for values in rl_bundle.rl["extraction"]["buffers"].values()
-    } == {6}
+        tier: values["max_segments"] for tier, values in buffers.items()
+    } == {"small": 3, "medium": 6, "large": 6}
+    assert {
+        (values["max_input_tokens"], values["max_total_context_tokens"])
+        for values in buffers.values()
+    } == {(16384, 24576)}
     storage = rl_bundle.rl["storage"]
     assert rl_bundle.embeddings["router"]["model_name"] == "sentence-transformers/all-MiniLM-L6-v2"
     assert rl_bundle.embeddings["router"]["dimension"] == 384
@@ -82,7 +85,7 @@ def test_api_roles_have_credentials_and_known_price_scopes() -> None:
         assert '"source_ids"' in prompt
         assert '"fact"' in prompt
         assert "external knowledge" in prompt
-    assert rl_bundle.fact_extraction_prompt_version("locomo").endswith("_v9")
+    assert rl_bundle.fact_extraction_prompt_version("locomo").endswith("_v10")
     assert rl_bundle.fact_extraction_prompt_version("longmemeval").endswith("_v7")
     assert "Personal Information and Fact Extractor" in extraction_prompts["locomo"]
     assert "temporary states" in extraction_prompts["locomo"]
