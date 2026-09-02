@@ -45,7 +45,7 @@ def create_experiment_manifest(
         "router_config": bundle.rl["router"],
         "qdrant_point_schema_version": QDRANT_FACT_SCHEMA_VERSION,
         "qdrant_storage": safe_qdrant_storage_config(bundle.rl["storage"]),
-        "git_commit": _git_commit(bundle.project.root_dir),
+        "git_commit": current_git_commit(bundle.project.root_dir),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     path = Path(output_path)
@@ -142,7 +142,8 @@ def _resolve(root: Path, value: str) -> Path:
     return path if path.is_absolute() else root / path
 
 
-def _git_commit(root: Path) -> str:
+def current_git_commit(root: Path) -> str:
+    """Return the checked-out revision for runtime provenance."""
     try:
         return subprocess.check_output(
             ["git", "-c", f"safe.directory={root.as_posix()}", "rev-parse", "HEAD"],

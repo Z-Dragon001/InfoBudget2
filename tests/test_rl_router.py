@@ -267,6 +267,81 @@ def test_fact_parser_supports_multiple_sources_and_merges_duplicate_provenance()
     assert '"source_ids":[0,1,2]' in parsed.block_text_by_segment["s1"]
 
 
+def test_fact_parser_canonicalizes_only_source_safe_singleton_segment_ids() -> None:
+    content = json.dumps(
+        {
+            "processed_segment_ids": ["sample:method:seg_000007"],
+            "data": [
+                {
+                    "segment_id": "sample:method:seg_010007",
+                    "source_ids": [29],
+                    "fact": "A source-grounded fact.",
+                }
+            ],
+        }
+    )
+    parsed = parse_fact_batch(
+        content,
+        ["sample:method:seg_000007"],
+        10,
+        {"sample:method:seg_000007": {27, 28, 29, 30, 31}},
+        canonicalize_singleton_segment_id=True,
+        forbidden_source_ids={26},
+    )
+    assert parsed.facts_by_segment == {
+        "sample:method:seg_000007": ["A source-grounded fact."]
+    }
+    assert parsed.source_ids_by_segment == {"sample:method:seg_000007": [[29]]}
+    assert parsed.normalizations == [
+        {
+            "normalization_type": "singleton_segment_id_canonicalization_v1",
+            "data_index": 0,
+            "model_segment_id": "sample:method:seg_010007",
+            "canonical_segment_id": "sample:method:seg_000007",
+            "source_ids": [29],
+        }
+    ]
+
+    multi_topic = json.loads(content)
+    multi_topic["processed_segment_ids"] = [
+        "sample:method:seg_000007",
+        "sample:method:seg_000008",
+    ]
+    with pytest.raises(ValueError, match="unknown segment_id"):
+        parse_fact_batch(
+            json.dumps(multi_topic),
+            ["sample:method:seg_000007", "sample:method:seg_000008"],
+            10,
+            {
+                "sample:method:seg_000007": {27, 28, 29, 30, 31},
+                "sample:method:seg_000008": {32},
+            },
+            canonicalize_singleton_segment_id=True,
+        )
+
+    unsafe_source = content.replace("[29]", "[99]")
+    with pytest.raises(ValueError, match="does not belong"):
+        parse_fact_batch(
+            unsafe_source,
+            ["sample:method:seg_000007"],
+            10,
+            {"sample:method:seg_000007": {27, 28, 29, 30, 31}},
+            canonicalize_singleton_segment_id=True,
+            forbidden_source_ids={26},
+        )
+
+    context_source = content.replace("[29]", "[26]")
+    with pytest.raises(ValueError, match="read-only context"):
+        parse_fact_batch(
+            context_source,
+            ["sample:method:seg_000007"],
+            10,
+            {"sample:method:seg_000007": {27, 28, 29, 30, 31}},
+            canonicalize_singleton_segment_id=True,
+            forbidden_source_ids={26},
+        )
+
+
 def test_json_repair_prompt_contains_exact_contract_without_conversation_rewrite() -> None:
     prompt = render_json_repair_prompt(
         invalid_output='{"data": [}',
@@ -1770,6 +1845,164 @@ def test_singleton_failure_keeps_parent_atomic_and_qdrant_empty(tmp_path) -> Non
         extraction_run_id="fallback-failed",
         with_vectors=False,
     ) == []
+    with pytest.raises(
+        ValueError, match="cached singleton recovery refused without changing state"
+    ):
+        generator.generate(
+            segments,
+            "fallback-failed",
+            resume=True,
+            recover_cached_singleton=True,
+            tiers=("small",),
+        )
+    with sqlite3.connect(tmp_path / "runs" / "fallback-failed" / "state.sqlite3") as db:
+        assert db.execute("SELECT status FROM batches").fetchone()[0] == "failed_terminal"
+        assert db.execute(
+            "SELECT status FROM fallback_batches ORDER BY child_index"
+        ).fetchall() == [("validated",), ("failed_terminal",)]
+    store.close()
+
+
+def test_cached_singleton_id_recovery_reuses_responses_without_model_calls(tmp_path) -> None:
+    segments = [
+        replace(
+            _segment(index),
+            text=(
+                f"[2026-01-01T00:00:0{index}.000, Thu] "
+                f"{index - 1}.Alice: Fact {index}."
+            ),
+            turn_ids=(index,),
+        )
+        for index in (1, 2)
+    ]
+    model = ModelSpec(
+        "api", "openai_compatible", "small", "small", 4096, 1, "n/a", 1024
+    )
+    calls = 0
+    model_calls_forbidden = False
+
+    def complete(tier, prompt, max_new_tokens):
+        nonlocal calls
+        assert not model_calls_forbidden
+        calls += 1
+        is_fallback = "FALLBACK SINGLETON EXTRACTION" in prompt
+        if not is_fallback:
+            processed = [item.segment_id for item in segments]
+            target = segments[0]
+            model_segment_id = target.segment_id
+            source_id = 1
+        elif segments[0].segment_id in prompt:
+            processed = [segments[0].segment_id]
+            target = segments[0]
+            model_segment_id = target.segment_id.replace("seg_000001", "seg_010001")
+            source_id = 0
+        else:
+            processed = [segments[1].segment_id]
+            target = segments[1]
+            model_segment_id = target.segment_id
+            source_id = 1
+        return BatchCompletion(
+            json.dumps(
+                {
+                    "processed_segment_ids": processed,
+                    "data": [
+                        {
+                            "segment_id": model_segment_id,
+                            "source_ids": [source_id],
+                            "fact": f"A candidate fact for {target.segment_id}.",
+                        }
+                    ],
+                }
+            ),
+            ProviderUsage(10, 3, tier),
+        )
+
+    config = {
+        "max_facts_per_segment": 10,
+        "reserve_output_tokens_per_segment": 64,
+        "schema_repair_max_attempts": 0,
+        "require_provider_usage": True,
+        "terminal_fallback": {
+            "enabled": True,
+            "tiers": ["small"],
+            "strategy": "failed_batch_to_singletons",
+            "max_depth": 1,
+            "context_prefix_turns": 1,
+            "discard_primary_batch_output": True,
+            "require_all_children_committed": True,
+            "count_provider_usage": True,
+            "cost_allocation": "topic_content_token_weight",
+        },
+        "buffers": {
+            "small": {
+                "max_segments": 2,
+                "max_input_tokens": 1000,
+                "max_total_context_tokens": 2000,
+            }
+        },
+    }
+    store = FactQdrantStore("unused", "cached_singleton_recovery", 4, in_memory=True)
+    generator = CandidateGenerator(
+        store=store,
+        encoder=_FakeEncoder(),
+        models={"small": model},
+        prices={"small": PriceSpec(1.0, 2.0)},
+        token_counters={"small": lambda text: len(text.split())},
+        completion=complete,
+        prompts={"small": "{router_level}\n{information_score}\n{segment_text}"},
+        prompt_versions={"small": "test-v2"},
+        extraction_config=config,
+        output_root=tmp_path,
+    )
+
+    failed = generator.generate(segments, "cached-recovery", tiers=("small",))
+    assert failed.status == "incomplete"
+    assert failed.fact_counts["small"] == 0
+    assert calls == 3
+
+    model_calls_forbidden = True
+    recovered = generator.generate(
+        segments,
+        "cached-recovery",
+        resume=True,
+        recover_cached_singleton=True,
+        tiers=("small",),
+    )
+    assert recovered.status == "complete"
+    assert recovered.fact_counts["small"] == 2
+    assert recovered.batch_status_counts == {"recovered_by_fallback": 1}
+    assert recovered.attempt_summary["logical_api_calls"] == 3
+    assert recovered.quality_metrics["singleton_segment_id_normalization_count"] == 1
+    assert calls == 3
+
+    points = store.candidate_points(
+        "small",
+        dataset_name=segments[0].dataset_name,
+        split=segments[0].split,
+        sample_id=segments[0].sample_id,
+        extraction_run_id="cached-recovery",
+        with_vectors=False,
+    )
+    assert len(points) == 2
+    first_payload = next(
+        point.payload for point in points if point.payload["segment_id"] == segments[0].segment_id
+    )
+    assert first_payload["singleton_segment_id_normalizations"] == [
+        {
+            "normalization_type": "singleton_segment_id_canonicalization_v1",
+            "data_index": 0,
+            "model_segment_id": segments[0].segment_id.replace(
+                "seg_000001", "seg_010001"
+            ),
+            "canonical_segment_id": segments[0].segment_id,
+            "source_ids": [0],
+        }
+    ]
+    with sqlite3.connect(tmp_path / "runs" / "cached-recovery" / "state.sqlite3") as db:
+        assert db.execute("SELECT status FROM batches").fetchone()[0] == "recovered_by_fallback"
+        assert db.execute(
+            "SELECT status FROM fallback_batches ORDER BY child_index"
+        ).fetchall() == [("committed",), ("committed",)]
     store.close()
 
 

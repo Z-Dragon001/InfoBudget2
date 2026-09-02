@@ -400,6 +400,7 @@ class CandidateGenerator:
         self._run_dir = Path()
         self._scope_hash = ""
         self._state: ExtractionRunState | None = None
+        self._cached_singleton_recovery_only = False
         self._fact_counts = {tier: 0 for tier in models}
         self._batch_counts = {tier: 0 for tier in models}
         self._ordered_segments: list[TopicSegment] = []
@@ -412,6 +413,7 @@ class CandidateGenerator:
         *,
         resume: bool = False,
         retry_terminal: bool = False,
+        recover_cached_singleton: bool = False,
         tiers: tuple[Tier, ...] | list[Tier] | None = None,
     ) -> CandidateGenerationSummary:
         if not segments:
@@ -432,6 +434,7 @@ class CandidateGenerator:
             extraction_run_id,
             resume=resume,
             retry_terminal=retry_terminal,
+            recover_cached_singleton=recover_cached_singleton,
             selected_tiers=selected_tiers,
             scope_hash=_scope_hash(
                 segments,
@@ -450,6 +453,7 @@ class CandidateGenerator:
         *,
         resume: bool = False,
         retry_terminal: bool = False,
+        recover_cached_singleton: bool = False,
         route_scope: dict[str, Any] | None = None,
     ) -> CandidateGenerationSummary:
         """Extract each segment exactly once using only its routed model tier."""
@@ -473,6 +477,7 @@ class CandidateGenerator:
             extraction_run_id,
             resume=resume,
             retry_terminal=retry_terminal,
+            recover_cached_singleton=recover_cached_singleton,
             selected_tiers=selected_tiers,
             scope_hash=_scope_hash(
                 segments,
@@ -493,6 +498,7 @@ class CandidateGenerator:
         *,
         resume: bool,
         retry_terminal: bool,
+        recover_cached_singleton: bool,
         selected_tiers: tuple[Tier, ...],
         scope_hash: str,
     ) -> CandidateGenerationSummary:
@@ -502,6 +508,7 @@ class CandidateGenerator:
         self._run_id = extraction_run_id or str(uuid.uuid4())
         self._run_dir = self.output_root / "runs" / self._run_id
         self._scope_hash = scope_hash
+        self._cached_singleton_recovery_only = recover_cached_singleton
         self._fact_counts = {tier: 0 for tier in self.models}
         self._batch_counts = {tier: 0 for tier in self.models}
         self._ordered_segments = list(segments)
@@ -512,6 +519,10 @@ class CandidateGenerator:
             self._state = ExtractionRunState(self._run_dir, self._run_id)
             try:
                 self._state.register_run(scope_hash, resume=resume)
+                if retry_terminal and recover_cached_singleton:
+                    raise ValueError(
+                        "retry_terminal and recover_cached_singleton are mutually exclusive"
+                    )
                 if retry_terminal:
                     if not resume:
                         raise ValueError("retry_terminal requires resume=True")
@@ -524,6 +535,14 @@ class CandidateGenerator:
                     self._state.retry_terminal(selected_tiers)
                     for batch_id in [*terminal_batch_ids, *fallback_batch_ids]:
                         self._selected_response_path(batch_id).unlink(missing_ok=True)
+                if recover_cached_singleton:
+                    if not resume:
+                        raise ValueError(
+                            "recover_cached_singleton requires resume=True"
+                        )
+                    self._prepare_cached_singleton_recovery(
+                        segments, selected_tiers
+                    )
                 buffers = build_tier_buffers(
                     self.prompts,
                     self.cfg,
@@ -1016,6 +1035,11 @@ class CandidateGenerator:
                         recovery.child_batch_ids if recovery is not None else {}
                     ),
                     "fallback_reason": recovery.reason if recovery is not None else "",
+                    "singleton_segment_id_normalizations": (
+                        recovery.parsed.normalizations
+                        if recovery is not None
+                        else []
+                    ),
                     "status": (
                         "recovered_by_fallback" if recovery is not None else "ok"
                     ),
@@ -1111,6 +1135,114 @@ class CandidateGenerator:
                     }
                 )
 
+    def _prepare_cached_singleton_recovery(
+        self,
+        segments: list[TopicSegment],
+        selected_tiers: tuple[Tier, ...],
+    ) -> None:
+        """Prevalidate every cached child, then atomically re-open safe parents."""
+        if self._state is None:
+            raise RuntimeError("candidate run state is not initialized")
+        terminal_parent_ids = self._state.batch_ids("failed_terminal", selected_tiers)
+        rows = self._state.terminal_fallback_rows(selected_tiers)
+        parent_ids = list(
+            dict.fromkeys(str(row["parent_batch_id"]) for row in rows)
+        )
+        unsupported = sorted(set(terminal_parent_ids) - set(parent_ids))
+        if unsupported:
+            raise ValueError(
+                "cached singleton recovery only supports terminal parents with "
+                f"existing singleton children; unsupported parents: {unsupported}"
+            )
+        if not parent_ids:
+            raise ValueError(
+                "cached singleton recovery found no terminal singleton fallback"
+            )
+
+        segment_by_id = {segment.segment_id: segment for segment in segments}
+        errors: list[str] = []
+        for parent_id in parent_ids:
+            parent_rows = [
+                row for row in rows if str(row["parent_batch_id"]) == parent_id
+            ]
+            expected_ids = json.loads(
+                str(parent_rows[0]["parent_segment_ids_json"])
+            )
+            child_ids = [str(row["target_segment_id"]) for row in parent_rows]
+            if child_ids != expected_ids:
+                errors.append(
+                    f"{parent_id}: singleton child order does not match parent segments"
+                )
+                continue
+            if self._load_selected_response(parent_id) is None:
+                errors.append(f"{parent_id}: cached parent response is missing or invalid")
+                continue
+
+            terminal_child_normalized = False
+            for row in parent_rows:
+                child_id = str(row["fallback_batch_id"])
+                target_id = str(row["target_segment_id"])
+                segment = segment_by_id.get(target_id)
+                if segment is None:
+                    errors.append(f"{child_id}: target segment {target_id!r} is missing")
+                    continue
+                response = self._load_selected_response(child_id)
+                if response is None:
+                    errors.append(
+                        f"{child_id}: cached singleton response is missing or invalid"
+                    )
+                    continue
+                if not self._provider_usage_allowed(response):
+                    errors.append(f"{child_id}: cached provider usage is missing")
+                    continue
+                if _response_was_truncated(response):
+                    errors.append(f"{child_id}: cached singleton response was truncated")
+                    continue
+                try:
+                    context_ids = {
+                        int(value)
+                        for value in json.loads(
+                            str(row["context_source_ids_json"])
+                        )
+                    }
+                    parsed = parse_fact_batch(
+                        response.content,
+                        [target_id],
+                        tier_config_int(
+                            self.cfg,
+                            "max_facts_per_segment",
+                            str(row["parent_tier"]),
+                        ),
+                        {target_id: _allowed_source_ids(segment)},
+                        canonicalize_singleton_segment_id=True,
+                        forbidden_source_ids=context_ids,
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    errors.append(f"{child_id}: {exc}")
+                    continue
+                if str(row["child_status"]) == "failed_terminal":
+                    if not parsed.normalizations:
+                        errors.append(
+                            f"{child_id}: terminal child has no safe segment-id normalization"
+                        )
+                    else:
+                        terminal_child_normalized = True
+            if not terminal_child_normalized:
+                errors.append(
+                    f"{parent_id}: no terminal child has a safe segment-id normalization"
+                )
+
+        if errors:
+            raise ValueError(
+                "cached singleton recovery refused without changing state: "
+                + " | ".join(errors)
+            )
+        reset_count = self._state.reset_cached_singleton_recovery(parent_ids)
+        if reset_count != len(parent_ids):
+            raise RuntimeError(
+                "cached singleton recovery state reset did not include every parent"
+            )
+
     def _recover_with_singletons(
         self,
         *,
@@ -1155,6 +1287,7 @@ class CandidateGenerator:
         child_batch_ids: dict[str, str] = {}
         context_ids_by_segment: dict[str, list[int]] = {}
         child_usages: dict[str, ProviderUsage] = {}
+        normalizations: list[dict[str, Any]] = []
         terminal_errors: list[str] = []
         max_facts = tier_config_int(self.cfg, "max_facts_per_segment", tier)
 
@@ -1295,6 +1428,10 @@ class CandidateGenerator:
                     [segment.segment_id],
                     max_facts,
                     {segment.segment_id: _allowed_source_ids(segment)},
+                    canonicalize_singleton_segment_id=(
+                        self._cached_singleton_recovery_only
+                    ),
+                    forbidden_source_ids=set(context_source_ids),
                 )
             except ValueError as exc:
                 error = f"singleton fallback validation failed: {exc}"
@@ -1320,6 +1457,7 @@ class CandidateGenerator:
             blocks_by_segment[segment.segment_id] = parsed.block_text_by_segment[
                 segment.segment_id
             ]
+            normalizations.extend(parsed.normalizations)
             child_usages[segment.segment_id] = self._aggregate_batch_usage(
                 child_batch_id, tier
             )
@@ -1356,6 +1494,7 @@ class CandidateGenerator:
                 facts_by_segment,
                 sources_by_segment,
                 blocks_by_segment,
+                normalizations,
             ),
             reason=reason,
             child_batch_ids=child_batch_ids,
@@ -1395,6 +1534,7 @@ class CandidateGenerator:
                 "fallback_child_batch_id": "",
                 "fallback_reason": "",
                 "context_only_source_ids": [],
+                "singleton_segment_id_normalizations": [],
             }
         total_content_tokens = sum(recovery.content_token_weights.values())
         if total_content_tokens:
@@ -1411,6 +1551,11 @@ class CandidateGenerator:
             "fallback_child_batch_id": recovery.child_batch_ids[segment.segment_id],
             "fallback_reason": recovery.reason,
             "context_only_source_ids": recovery.context_source_ids[segment.segment_id],
+            "singleton_segment_id_normalizations": [
+                item
+                for item in recovery.parsed.normalizations
+                if item.get("canonical_segment_id") == segment.segment_id
+            ],
             "fallback_cost_allocation_method": "topic_content_token_weight",
             "primary_content_tokens": recovery.content_token_weights[
                 segment.segment_id
@@ -1492,6 +1637,10 @@ class CandidateGenerator:
         max_new_tokens: int,
         call_type: str,
     ) -> BatchCompletion | None:
+        if self._cached_singleton_recovery_only:
+            raise RuntimeError(
+                "cached singleton recovery forbids new model API calls"
+            )
         call_index = self._next_logical_call_index(batch_id)
         call_dir = self._run_dir / "raw" / tier / batch_id / f"call_{call_index:03d}_{call_type}"
         atomic_write_json(
@@ -1829,6 +1978,10 @@ class CandidateGenerator:
         recovered_batches = int(
             state_summary.get("by_status", {}).get("recovered_by_fallback", 0)
         )
+        singleton_segment_id_normalizations = sum(
+            len(row.get("singleton_segment_id_normalizations") or [])
+            for row in rows
+        )
 
         def rate(numerator: int, denominator: int) -> float:
             return numerator / denominator if denominator else 0.0
@@ -1841,6 +1994,9 @@ class CandidateGenerator:
             "repair_batches": repair_batches,
             "failed_batches": failed_batches,
             "recovered_by_fallback_batches": recovered_batches,
+            "singleton_segment_id_normalization_count": (
+                singleton_segment_id_normalizations
+            ),
             "empty_fact_segment_rate": rate(empty_segments, total_segment_results),
             "saturated_segment_rate": rate(saturated_segments, total_segment_results),
             "repair_batch_rate": rate(repair_batches, total_batches),

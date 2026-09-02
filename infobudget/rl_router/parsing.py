@@ -103,8 +103,16 @@ def parse_fact_batch(
     expected_segment_ids: list[str],
     max_facts: int,
     expected_source_ids_by_segment: dict[str, set[int]] | None = None,
+    *,
+    canonicalize_singleton_segment_id: bool = False,
+    forbidden_source_ids: set[int] | None = None,
 ) -> ParsedBatch:
-    """Parse JSON-only output and enforce segment, source, and per-tier fact limits."""
+    """Parse JSON-only output and enforce segment, source, and per-tier fact limits.
+
+    A cached singleton response may be canonicalized only when the top-level target is
+    exact and every cited source belongs to that one target. Multi-topic responses are
+    never canonicalized.
+    """
     try:
         root = json.loads(content)
     except json.JSONDecodeError as exc:
@@ -130,6 +138,9 @@ def parse_fact_batch(
         segment_id: [] for segment_id in expected_segment_ids
     }
     serialized_items = {segment_id: [] for segment_id in expected_segment_ids}
+    normalizations: list[dict[str, object]] = []
+    unknown_segment_ids: set[str] = set()
+    forbidden = set(forbidden_source_ids or ())
     for index, item in enumerate(data):
         if not isinstance(item, dict):
             raise ValueError(
@@ -142,19 +153,71 @@ def parse_fact_batch(
             raise ValueError(
                 f"data[{index}] must contain only segment_id, source_ids, and fact"
             )
-        segment_id = item["segment_id"]
-        if not isinstance(segment_id, str) or segment_id not in expected:
-            raise ValueError(f"unknown segment_id in model output: {segment_id!r}")
+        model_segment_id = item["segment_id"]
+        if not isinstance(model_segment_id, str):
+            raise ValueError(
+                f"unknown segment_id in model output: {model_segment_id!r}"
+            )
         raw_source_ids = item.get("source_ids", [item.get("source_id")])
         if not isinstance(raw_source_ids, list) or not raw_source_ids:
-            raise ValueError(f"source_ids for {segment_id} must be a non-empty array")
+            raise ValueError(
+                f"source_ids for {model_segment_id} must be a non-empty array"
+            )
         source_ids: list[int] = []
         for source_id in raw_source_ids:
             if isinstance(source_id, bool) or not isinstance(source_id, int) or source_id < 0:
-                raise ValueError(f"invalid source_id for {segment_id}: {source_id!r}")
+                raise ValueError(
+                    f"invalid source_id for {model_segment_id}: {source_id!r}"
+                )
             if source_id not in source_ids:
                 source_ids.append(source_id)
         source_ids.sort()
+        forbidden_used = [
+            source_id for source_id in source_ids if source_id in forbidden
+        ]
+        if forbidden_used:
+            raise ValueError(
+                f"source_id {forbidden_used[0]} is read-only context and cannot be cited"
+            )
+
+        segment_id = model_segment_id
+        if segment_id not in expected:
+            can_canonicalize = (
+                canonicalize_singleton_segment_id
+                and len(expected_segment_ids) == 1
+                and expected_source_ids_by_segment is not None
+            )
+            if not can_canonicalize:
+                raise ValueError(
+                    f"unknown segment_id in model output: {model_segment_id!r}"
+                )
+            canonical_segment_id = expected_segment_ids[0]
+            allowed = expected_source_ids_by_segment[canonical_segment_id]
+            invalid = [
+                source_id for source_id in source_ids if source_id not in allowed
+            ]
+            if invalid:
+                raise ValueError(
+                    "cannot canonicalize unknown segment_id "
+                    f"{model_segment_id!r}: source_id {invalid[0]} does not belong "
+                    f"to segment {canonical_segment_id}"
+                )
+            unknown_segment_ids.add(model_segment_id)
+            if len(unknown_segment_ids) > 1:
+                raise ValueError(
+                    "cannot canonicalize multiple unknown segment_ids in one singleton "
+                    f"response: {sorted(unknown_segment_ids)}"
+                )
+            segment_id = canonical_segment_id
+            normalizations.append(
+                {
+                    "normalization_type": "singleton_segment_id_canonicalization_v1",
+                    "data_index": index,
+                    "model_segment_id": model_segment_id,
+                    "canonical_segment_id": canonical_segment_id,
+                    "source_ids": source_ids,
+                }
+            )
         if expected_source_ids_by_segment is not None:
             allowed = expected_source_ids_by_segment[segment_id]
             invalid = [source_id for source_id in source_ids if source_id not in allowed]
@@ -193,7 +256,12 @@ def parse_fact_batch(
         )
         for segment_id in expected_segment_ids
     }
-    return ParsedBatch(facts_by_segment, source_ids_by_segment, blocks)
+    return ParsedBatch(
+        facts_by_segment,
+        source_ids_by_segment,
+        blocks,
+        normalizations,
+    )
 
 
 def is_schema_repairable(error: Exception) -> bool:

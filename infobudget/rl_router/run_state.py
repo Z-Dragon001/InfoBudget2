@@ -366,6 +366,74 @@ class ExtractionRunState:
             ).fetchall()
         ]
 
+    def terminal_fallback_rows(
+        self, tiers: tuple[str, ...] | list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Return every singleton child belonging to selected terminal parents."""
+        selected = tuple(tiers or ())
+        tier_clause = ""
+        parameters: list[Any] = [self.run_id, "failed_terminal"]
+        if selected:
+            tier_clause = f" AND parent.tier IN ({','.join('?' for _ in selected)})"
+            parameters.extend(selected)
+        rows = self.connection.execute(
+            "SELECT parent.batch_id AS parent_batch_id, "
+            "parent.sequence_index AS parent_sequence_index, "
+            "parent.segment_ids_json AS parent_segment_ids_json, "
+            "parent.tier AS parent_tier, parent.last_error AS parent_last_error, "
+            "child.fallback_batch_id, child.target_segment_id, child.child_index, "
+            "child.context_source_ids_json, child.status AS child_status, "
+            "child.last_error AS child_last_error "
+            "FROM batches AS parent JOIN fallback_batches AS child "
+            "ON child.parent_batch_id = parent.batch_id "
+            "WHERE parent.run_id = ? AND parent.status = ?"
+            f"{tier_clause} ORDER BY parent.sequence_index, child.child_index",
+            parameters,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reset_cached_singleton_recovery(self, parent_batch_ids: list[str]) -> int:
+        """Re-open prevalidated terminal parents without deleting cached responses."""
+        if not parent_batch_ids:
+            return 0
+        unique_ids = list(dict.fromkeys(parent_batch_ids))
+        placeholders = ",".join("?" for _ in unique_ids)
+        now = utc_now()
+        with self.connection:
+            parents = self.connection.execute(
+                "SELECT batch_id FROM batches WHERE run_id = ? "
+                f"AND status = ? AND batch_id IN ({placeholders})",
+                [self.run_id, "failed_terminal", *unique_ids],
+            ).fetchall()
+            if len(parents) != len(unique_ids):
+                raise ValueError(
+                    "cached singleton recovery targets changed before state reset"
+                )
+            self.connection.execute(
+                "UPDATE fallback_batches SET status = ?, last_error = NULL, "
+                "updated_at = ? WHERE run_id = ? AND status = ? "
+                f"AND parent_batch_id IN ({placeholders})",
+                [
+                    "failed_retryable",
+                    now,
+                    self.run_id,
+                    "failed_terminal",
+                    *unique_ids,
+                ],
+            )
+            result = self.connection.execute(
+                "UPDATE batches SET status = ?, last_error = NULL, updated_at = ? "
+                f"WHERE run_id = ? AND status = ? AND batch_id IN ({placeholders})",
+                [
+                    "failed_retryable",
+                    now,
+                    self.run_id,
+                    "failed_terminal",
+                    *unique_ids,
+                ],
+            )
+        return int(result.rowcount)
+
     def retry_terminal(self, tiers: tuple[str, ...] | list[str] | None = None) -> int:
         selected = tuple(tiers or ())
         tier_clause = ""

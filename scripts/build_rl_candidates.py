@@ -27,6 +27,7 @@ from infobudget.rl_router.export import export_memories
 from infobudget.rl_router.io import load_segments
 from infobudget.rl_router.manifest import (
     create_experiment_manifest,
+    current_git_commit,
     file_sha256,
     memory_embedding_hash,
     resolve_collection_namespace,
@@ -53,23 +54,35 @@ def main() -> None:
         choices=TIERS,
         help="Extract only this tier. Repeat to select multiple tiers; default is all tiers.",
     )
-    parser.add_argument(
+    terminal_group = parser.add_mutually_exclusive_group()
+    terminal_group.add_argument(
         "--retry-terminal",
         action="store_true",
         help="With --resume, explicitly retry terminal schema failures.",
     )
+    terminal_group.add_argument(
+        "--recover-cached-singleton",
+        action="store_true",
+        help=(
+            "With --resume, revalidate cached singleton fallbacks and permit only "
+            "source-constrained singleton segment-id canonicalization; never call models."
+        ),
+    )
     args = parser.parse_args()
     if args.retry_terminal and not args.resume:
         parser.error("--retry-terminal requires --resume")
+    if args.recover_cached_singleton and not args.resume:
+        parser.error("--recover-cached-singleton requires --resume")
 
     bundle = load_rl_bundle(args.config_dir)
     selected_tiers = tuple(dict.fromkeys(args.tiers or TIERS))
     models = {tier: bundle.project.models[tier] for tier in TIERS}
-    require_api_keys(
-        models,
-        selected_tiers,
-        operation="candidate extraction",
-    )
+    if not args.recover_cached_singleton:
+        require_api_keys(
+            models,
+            selected_tiers,
+            operation="candidate extraction",
+        )
     FactQdrantStore.probe_storage_config(bundle.rl["storage"])
     segment_path = args.segments_jsonl.resolve()
     segments = load_segments(segment_path)
@@ -323,6 +336,7 @@ def main() -> None:
             run_id,
             resume=resume,
             retry_terminal=args.retry_terminal,
+            recover_cached_singleton=args.recover_cached_singleton,
             tiers=selected_tiers,
         )
         qdrant_counts = {
@@ -403,6 +417,18 @@ def main() -> None:
             "completed_tiers": completed_tiers,
             "last_selected_tiers": list(selected_tiers),
         }
+        if args.recover_cached_singleton:
+            final_updates["cached_singleton_recovery"] = {
+                "policy": "source_constrained_singleton_segment_id_canonicalization_v1",
+                "used_cached_responses_only": True,
+                "new_model_calls_allowed": False,
+                "recovery_git_commit": current_git_commit(root),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "normalization_count": summary.quality_metrics.get(
+                    "singleton_segment_id_normalization_count", 0
+                ),
+            }
+            final_updates["last_error"] = None
         if final_status == "complete":
             final_updates["completed_at"] = datetime.now(timezone.utc).isoformat()
         update_experiment_manifest(
@@ -417,6 +443,7 @@ def main() -> None:
                 "manifest_status": final_status,
                 "completed_tiers": completed_tiers,
                 "required_tiers": list(TIERS),
+                "cached_singleton_recovery": args.recover_cached_singleton,
             }
         )
         progress.close(

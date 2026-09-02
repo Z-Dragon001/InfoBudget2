@@ -235,6 +235,7 @@ class ParsedBatch:
     facts_by_segment: dict[str, list[str]]
     source_ids_by_segment: dict[str, list[list[int]]]
     block_text_by_segment: dict[str, str]
+    normalizations: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
