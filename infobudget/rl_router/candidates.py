@@ -42,6 +42,7 @@ from infobudget.rl_router.schemas import (
 from infobudget.schemas import ModelSpec, PriceSpec
 
 CompletionFunction = Callable[[Tier, str, int], BatchCompletion]
+FALLBACK_CALL_TYPES = {"fallback_singleton", "terminal_recovery_singleton"}
 
 
 class ProviderCircuitOpenError(RuntimeError):
@@ -278,6 +279,7 @@ class _FallbackRecovery:
     context_source_ids: dict[str, list[int]]
     child_usages: dict[str, ProviderUsage]
     content_token_weights: dict[str, int]
+    recovery_mode: str
 
 
 def estimate_candidate_plan(
@@ -401,6 +403,7 @@ class CandidateGenerator:
         self._scope_hash = ""
         self._state: ExtractionRunState | None = None
         self._cached_singleton_recovery_only = False
+        self._forced_singleton_recovery_reasons: dict[str, str] = {}
         self._fact_counts = {tier: 0 for tier in models}
         self._batch_counts = {tier: 0 for tier in models}
         self._ordered_segments: list[TopicSegment] = []
@@ -414,6 +417,7 @@ class CandidateGenerator:
         resume: bool = False,
         retry_terminal: bool = False,
         recover_cached_singleton: bool = False,
+        recover_terminal_with_singletons: bool = False,
         tiers: tuple[Tier, ...] | list[Tier] | None = None,
     ) -> CandidateGenerationSummary:
         if not segments:
@@ -435,6 +439,7 @@ class CandidateGenerator:
             resume=resume,
             retry_terminal=retry_terminal,
             recover_cached_singleton=recover_cached_singleton,
+            recover_terminal_with_singletons=recover_terminal_with_singletons,
             selected_tiers=selected_tiers,
             scope_hash=_scope_hash(
                 segments,
@@ -454,6 +459,7 @@ class CandidateGenerator:
         resume: bool = False,
         retry_terminal: bool = False,
         recover_cached_singleton: bool = False,
+        recover_terminal_with_singletons: bool = False,
         route_scope: dict[str, Any] | None = None,
     ) -> CandidateGenerationSummary:
         """Extract each segment exactly once using only its routed model tier."""
@@ -478,6 +484,7 @@ class CandidateGenerator:
             resume=resume,
             retry_terminal=retry_terminal,
             recover_cached_singleton=recover_cached_singleton,
+            recover_terminal_with_singletons=recover_terminal_with_singletons,
             selected_tiers=selected_tiers,
             scope_hash=_scope_hash(
                 segments,
@@ -499,6 +506,7 @@ class CandidateGenerator:
         resume: bool,
         retry_terminal: bool,
         recover_cached_singleton: bool,
+        recover_terminal_with_singletons: bool,
         selected_tiers: tuple[Tier, ...],
         scope_hash: str,
     ) -> CandidateGenerationSummary:
@@ -509,6 +517,7 @@ class CandidateGenerator:
         self._run_dir = self.output_root / "runs" / self._run_id
         self._scope_hash = scope_hash
         self._cached_singleton_recovery_only = recover_cached_singleton
+        self._forced_singleton_recovery_reasons = {}
         self._fact_counts = {tier: 0 for tier in self.models}
         self._batch_counts = {tier: 0 for tier in self.models}
         self._ordered_segments = list(segments)
@@ -519,9 +528,14 @@ class CandidateGenerator:
             self._state = ExtractionRunState(self._run_dir, self._run_id)
             try:
                 self._state.register_run(scope_hash, resume=resume)
-                if retry_terminal and recover_cached_singleton:
+                recovery_modes = (
+                    retry_terminal,
+                    recover_cached_singleton,
+                    recover_terminal_with_singletons,
+                )
+                if sum(bool(mode) for mode in recovery_modes) > 1:
                     raise ValueError(
-                        "retry_terminal and recover_cached_singleton are mutually exclusive"
+                        "terminal retry and recovery modes are mutually exclusive"
                     )
                 if retry_terminal:
                     if not resume:
@@ -541,6 +555,14 @@ class CandidateGenerator:
                             "recover_cached_singleton requires resume=True"
                         )
                     self._prepare_cached_singleton_recovery(
+                        segments, selected_tiers
+                    )
+                if recover_terminal_with_singletons:
+                    if not resume:
+                        raise ValueError(
+                            "recover_terminal_with_singletons requires resume=True"
+                        )
+                    self._prepare_terminal_singleton_recovery(
                         segments, selected_tiers
                     )
                 buffers = build_tier_buffers(
@@ -658,7 +680,24 @@ class CandidateGenerator:
             }
             max_facts = tier_config_int(self.cfg, "max_facts_per_segment", tier)
             recovery: _FallbackRecovery | None = None
-            if _response_was_truncated(response):
+            forced_recovery_reason = self._forced_singleton_recovery_reasons.get(
+                batch_id
+            )
+            if forced_recovery_reason:
+                recovery = self._recover_with_singletons(
+                    tier=tier,
+                    sample_id=sample_id,
+                    parent_batch_id=batch_id,
+                    segments=segments,
+                    reason=forced_recovery_reason,
+                    failure_ledger=failure_ledger,
+                    force=True,
+                    recovery_mode="explicit_terminal_to_singletons_v1",
+                )
+                if recovery is None:
+                    return
+                parsed = recovery.parsed
+            elif _response_was_truncated(response):
                 error = (
                     "model output was truncated: "
                     f"finish_reason={response.usage.finish_reason}"
@@ -1035,6 +1074,9 @@ class CandidateGenerator:
                         recovery.child_batch_ids if recovery is not None else {}
                     ),
                     "fallback_reason": recovery.reason if recovery is not None else "",
+                    "fallback_recovery_mode": (
+                        recovery.recovery_mode if recovery is not None else ""
+                    ),
                     "singleton_segment_id_normalizations": (
                         recovery.parsed.normalizations
                         if recovery is not None
@@ -1134,6 +1176,73 @@ class CandidateGenerator:
                         ),
                     }
                 )
+
+    def _prepare_terminal_singleton_recovery(
+        self,
+        segments: list[TopicSegment],
+        selected_tiers: tuple[Tier, ...],
+    ) -> None:
+        """Re-open cached terminal parents for an explicit singleton recovery."""
+        if self._state is None:
+            raise RuntimeError("candidate run state is not initialized")
+        rows = self._state.terminal_parent_rows(selected_tiers)
+        if not rows:
+            raise ValueError(
+                "terminal singleton recovery found no selected failed_terminal batches"
+            )
+        segment_ids = {segment.segment_id for segment in segments}
+        errors: list[str] = []
+        reasons: dict[str, str] = {}
+        parent_ids: list[str] = []
+        for row in rows:
+            parent_id = str(row["batch_id"])
+            parent_ids.append(parent_id)
+            planned_ids = json.loads(str(row["segment_ids_json"]))
+            if len(planned_ids) <= 1:
+                errors.append(
+                    f"{parent_id}: terminal parent is already a singleton"
+                )
+                continue
+            missing_ids = [item for item in planned_ids if item not in segment_ids]
+            if missing_ids:
+                errors.append(
+                    f"{parent_id}: planned segments are missing from input: {missing_ids}"
+                )
+                continue
+            if self._state.fallback_batch_ids([parent_id]):
+                errors.append(
+                    f"{parent_id}: singleton children already exist; use cached "
+                    "singleton recovery instead"
+                )
+                continue
+            response = self._load_selected_response(parent_id)
+            if response is None:
+                errors.append(
+                    f"{parent_id}: cached terminal parent response is missing or invalid"
+                )
+                continue
+            if not self._provider_usage_allowed(response):
+                errors.append(f"{parent_id}: cached provider usage is missing")
+                continue
+            last_error = str(row.get("last_error") or "").strip()
+            if not last_error:
+                errors.append(f"{parent_id}: terminal parent has no recorded error")
+                continue
+            reasons[parent_id] = (
+                "explicit terminal-to-singleton recovery: " + last_error
+            )
+
+        if errors:
+            raise ValueError(
+                "terminal singleton recovery refused without changing state: "
+                + " | ".join(errors)
+            )
+        reset_count = self._state.reset_terminal_parents_for_singletons(parent_ids)
+        if reset_count != len(parent_ids):
+            raise RuntimeError(
+                "terminal singleton recovery state reset did not include every parent"
+            )
+        self._forced_singleton_recovery_reasons = reasons
 
     def _prepare_cached_singleton_recovery(
         self,
@@ -1252,12 +1361,16 @@ class CandidateGenerator:
         segments: list[TopicSegment],
         reason: str,
         failure_ledger: SqliteLedger,
+        force: bool = False,
+        recovery_mode: str = "automatic_terminal_fallback_v1",
     ) -> _FallbackRecovery | None:
         if self._state is None:
             raise RuntimeError("candidate run state is not initialized")
         fallback_cfg = self.cfg.get("terminal_fallback", {})
         enabled_tiers = tuple(fallback_cfg.get("tiers") or ())
-        enabled = bool(fallback_cfg.get("enabled", False)) and tier in enabled_tiers
+        enabled = force or (
+            bool(fallback_cfg.get("enabled", False)) and tier in enabled_tiers
+        )
         if not enabled or len(segments) <= 1:
             self._state.mark(parent_batch_id, "failed_terminal", reason)
             self._record_failure(
@@ -1359,12 +1472,17 @@ class CandidateGenerator:
                     continue
                 self._state.mark_fallback(child_batch_id, "requesting")
                 try:
+                    call_type = (
+                        "terminal_recovery_singleton"
+                        if force
+                        else "fallback_singleton"
+                    )
                     response = self._call_model(
                         tier=tier,
                         batch_id=child_batch_id,
                         prompt=fallback_prompt,
                         max_new_tokens=max_new_tokens,
-                        call_type="fallback_singleton",
+                        call_type=call_type,
                     )
                 except ProviderCircuitOpenError as exc:
                     self._state.mark_fallback(
@@ -1504,6 +1622,11 @@ class CandidateGenerator:
                 segment.segment_id: self.token_counters[tier](segment.text)
                 for segment in segments
             },
+            recovery_mode=(
+                "cached_singleton_segment_id_recovery_v1"
+                if self._cached_singleton_recovery_only
+                else recovery_mode
+            ),
         )
 
     def _preceding_context(self, segment: TopicSegment) -> tuple[str, list[int]]:
@@ -1533,6 +1656,7 @@ class CandidateGenerator:
                 "parent_batch_id": "",
                 "fallback_child_batch_id": "",
                 "fallback_reason": "",
+                "fallback_recovery_mode": "",
                 "context_only_source_ids": [],
                 "singleton_segment_id_normalizations": [],
             }
@@ -1550,6 +1674,7 @@ class CandidateGenerator:
             "parent_batch_id": parent_batch_id,
             "fallback_child_batch_id": recovery.child_batch_ids[segment.segment_id],
             "fallback_reason": recovery.reason,
+            "fallback_recovery_mode": recovery.recovery_mode,
             "context_only_source_ids": recovery.context_source_ids[segment.segment_id],
             "singleton_segment_id_normalizations": [
                 item
@@ -1869,7 +1994,12 @@ class CandidateGenerator:
             )
             fallback_rows = [
                 row for row in tier_rows
-                if row.get("call_type") == "fallback_singleton"
+                if row.get("call_type") in FALLBACK_CALL_TYPES
+            ]
+            terminal_recovery_rows = [
+                row
+                for row in tier_rows
+                if row.get("call_type") == "terminal_recovery_singleton"
             ]
             repair_rows = [
                 row for row in tier_rows
@@ -1882,12 +2012,26 @@ class CandidateGenerator:
                 }
             )
             by_tier[tier]["fallback_cost"] = _known_attempt_cost(fallback_rows)
+            by_tier[tier]["terminal_recovery_calls"] = len(
+                {
+                    (row.get("batch_id"), row.get("logical_call_index"))
+                    for row in terminal_recovery_rows
+                }
+            )
+            by_tier[tier]["terminal_recovery_cost"] = _known_attempt_cost(
+                terminal_recovery_rows
+            )
             by_tier[tier]["schema_repair_cost"] = _known_attempt_cost(repair_rows)
             by_tier[tier]["primary_cost"] = (
                 by_tier[tier]["known_cost"] - by_tier[tier]["fallback_cost"]
             )
         fallback_rows = [
-            row for row in rows if row.get("call_type") == "fallback_singleton"
+            row for row in rows if row.get("call_type") in FALLBACK_CALL_TYPES
+        ]
+        terminal_recovery_rows = [
+            row
+            for row in rows
+            if row.get("call_type") == "terminal_recovery_singleton"
         ]
         repair_rows = [
             row for row in rows if row.get("call_type") == "schema_repair"
@@ -1926,6 +2070,15 @@ class CandidateGenerator:
                     (row.get("batch_id"), row.get("logical_call_index"))
                     for row in fallback_rows
                 }
+            ),
+            "terminal_recovery_calls": len(
+                {
+                    (row.get("batch_id"), row.get("logical_call_index"))
+                    for row in terminal_recovery_rows
+                }
+            ),
+            "terminal_recovery_cost": _known_attempt_cost(
+                terminal_recovery_rows
             ),
         }
 

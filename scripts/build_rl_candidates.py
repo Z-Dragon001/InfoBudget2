@@ -68,11 +68,23 @@ def main() -> None:
             "source-constrained singleton segment-id canonicalization; never call models."
         ),
     )
+    terminal_group.add_argument(
+        "--recover-terminal-with-singletons",
+        action="store_true",
+        help=(
+            "With --resume, keep each failed parent response for audit but do not "
+            "retry it; instead call the selected tier once per Topic and commit the "
+            "parent atomically only when every singleton validates. New calls and "
+            "their actual provider cost are recorded."
+        ),
+    )
     args = parser.parse_args()
     if args.retry_terminal and not args.resume:
         parser.error("--retry-terminal requires --resume")
     if args.recover_cached_singleton and not args.resume:
         parser.error("--recover-cached-singleton requires --resume")
+    if args.recover_terminal_with_singletons and not args.resume:
+        parser.error("--recover-terminal-with-singletons requires --resume")
 
     bundle = load_rl_bundle(args.config_dir)
     selected_tiers = tuple(dict.fromkeys(args.tiers or TIERS))
@@ -337,6 +349,9 @@ def main() -> None:
             resume=resume,
             retry_terminal=args.retry_terminal,
             recover_cached_singleton=args.recover_cached_singleton,
+            recover_terminal_with_singletons=(
+                args.recover_terminal_with_singletons
+            ),
             tiers=selected_tiers,
         )
         qdrant_counts = {
@@ -429,6 +444,28 @@ def main() -> None:
                 ),
             }
             final_updates["last_error"] = None
+        if args.recover_terminal_with_singletons:
+            recovery_finished_at = datetime.now(timezone.utc).isoformat()
+            recovery_audit = {
+                "policy": "explicit_terminal_to_singletons_v1",
+                "target_tiers": list(selected_tiers),
+                "used_cached_parent_responses": True,
+                "retried_parent_batches": False,
+                "new_model_calls_allowed": True,
+                "status": summary.status,
+                "terminal_recovery_calls": summary.attempt_summary.get(
+                    "terminal_recovery_calls", 0
+                ),
+                "terminal_recovery_cost": summary.attempt_summary.get(
+                    "terminal_recovery_cost", 0
+                ),
+                "recovery_git_commit": current_git_commit(root),
+                "finished_at": recovery_finished_at,
+            }
+            if summary.status == "complete":
+                recovery_audit["completed_at"] = recovery_finished_at
+                final_updates["last_error"] = None
+            final_updates["terminal_singleton_recovery"] = recovery_audit
         if final_status == "complete":
             final_updates["completed_at"] = datetime.now(timezone.utc).isoformat()
         update_experiment_manifest(
@@ -444,6 +481,9 @@ def main() -> None:
                 "completed_tiers": completed_tiers,
                 "required_tiers": list(TIERS),
                 "cached_singleton_recovery": args.recover_cached_singleton,
+                "terminal_singleton_recovery": (
+                    args.recover_terminal_with_singletons
+                ),
             }
         )
         progress.close(

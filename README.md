@@ -69,6 +69,7 @@ file when recovering:
 uv run python scripts/build_rl_candidates.py <segments.jsonl> --extraction-run-id <run_id>
 uv run python scripts/build_rl_candidates.py <segments.jsonl> --resume <run_id>
 uv run python scripts/build_rl_candidates.py <segments.jsonl> --resume <run_id> --retry-terminal
+uv run python scripts/build_rl_candidates.py <segments.jsonl> --resume <run_id> --tier medium --recover-terminal-with-singletons
 uv run python scripts/reconcile_extraction_run.py <run_id>
 ```
 
@@ -116,9 +117,16 @@ campaign freezes only the prompt role, version, and SHA-256 selected for its own
 changing that prompt requires a new campaign and new extraction runs for that dataset.
 
 `--resume` skips committed batches and retries only recoverable work. Terminal schema
-failures remain skipped unless `--retry-terminal` is explicit. State, raw request/response
-archives, attempt-level cost ledgers, run-scoped exports, and `manifest.json` are stored
-under `outputs/rl_router/runs/<run_id>/`. No authorization header or API key is archived.
+failures remain skipped unless an explicit recovery mode is selected. `--retry-terminal`
+repeats the failed parent request. `--recover-terminal-with-singletons` instead preserves
+the cached parent response, directly extracts every Topic in that failed parent as a
+singleton with one read-only preceding turn, and commits only after all children validate.
+The parent cost is allocated by each Topic's content-token weight; every singleton's actual
+provider usage is added to its Topic. Existing singleton children are never overwritten;
+use `--recover-cached-singleton` only for the separately constrained, zero-call cached-ID
+normalization path. State, raw request/response archives, attempt-level cost ledgers,
+run-scoped exports, and `manifest.json` are stored under
+`outputs/rl_router/runs/<run_id>/`. No authorization header or API key is archived.
 
 For LoCoMo, `full` is the frozen ten-conversation preprocessing/candidate source, not a
 router-training partition. The five-fold manifest under `datasets/splits/locomo` selects

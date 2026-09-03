@@ -392,6 +392,66 @@ class ExtractionRunState:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def terminal_parent_rows(
+        self, tiers: tuple[str, ...] | list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Return selected terminal parent batches in deterministic order."""
+        selected = tuple(tiers or ())
+        tier_clause = ""
+        parameters: list[Any] = [self.run_id, "failed_terminal"]
+        if selected:
+            tier_clause = f" AND tier IN ({','.join('?' for _ in selected)})"
+            parameters.extend(selected)
+        rows = self.connection.execute(
+            "SELECT batch_id, sequence_index, segment_ids_json, tier, last_error "
+            "FROM batches WHERE run_id = ? AND status = ?"
+            f"{tier_clause} ORDER BY tier, sequence_index",
+            parameters,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reset_terminal_parents_for_singletons(
+        self, parent_batch_ids: list[str]
+    ) -> int:
+        """Re-open terminal parents only when they have no singleton children yet."""
+        if not parent_batch_ids:
+            return 0
+        unique_ids = list(dict.fromkeys(parent_batch_ids))
+        placeholders = ",".join("?" for _ in unique_ids)
+        now = utc_now()
+        with self.connection:
+            parents = self.connection.execute(
+                "SELECT batch_id FROM batches WHERE run_id = ? AND status = ? "
+                f"AND batch_id IN ({placeholders})",
+                [self.run_id, "failed_terminal", *unique_ids],
+            ).fetchall()
+            if len(parents) != len(unique_ids):
+                raise ValueError(
+                    "terminal singleton recovery targets changed before state reset"
+                )
+            existing_children = self.connection.execute(
+                "SELECT DISTINCT parent_batch_id FROM fallback_batches WHERE run_id = ? "
+                f"AND parent_batch_id IN ({placeholders})",
+                [self.run_id, *unique_ids],
+            ).fetchall()
+            if existing_children:
+                raise ValueError(
+                    "terminal singleton recovery requires parents without existing "
+                    "singleton children"
+                )
+            result = self.connection.execute(
+                "UPDATE batches SET status = ?, last_error = NULL, updated_at = ? "
+                f"WHERE run_id = ? AND status = ? AND batch_id IN ({placeholders})",
+                [
+                    "failed_retryable",
+                    now,
+                    self.run_id,
+                    "failed_terminal",
+                    *unique_ids,
+                ],
+            )
+        return int(result.rowcount)
+
     def reset_cached_singleton_recovery(self, parent_batch_ids: list[str]) -> int:
         """Re-open prevalidated terminal parents without deleting cached responses."""
         if not parent_batch_ids:

@@ -1752,6 +1752,183 @@ def test_failed_parent_recovers_atomically_with_singletons_and_weighted_cost(tmp
     store.close()
 
 
+def test_explicit_terminal_parent_recovery_calls_only_medium_singletons(tmp_path) -> None:
+    segments = [
+        replace(
+            _segment(1),
+            text="[2026-01-01T00:00:00.000, Thu] 0.Alice: Short fact.",
+            turn_ids=(1,),
+        ),
+        replace(
+            _segment(2),
+            text=(
+                "[2026-01-01T00:00:01.000, Thu] 1.Bob: "
+                "A substantially longer durable second fact."
+            ),
+            turn_ids=(2,),
+        ),
+    ]
+    model = ModelSpec(
+        "api", "openai_compatible", "medium", "medium", 4096, 1, "n/a", 1024
+    )
+    prompts_seen: list[str] = []
+
+    def complete(tier, prompt, max_new_tokens):
+        prompts_seen.append(prompt)
+        if "FALLBACK SINGLETON EXTRACTION" not in prompt:
+            content = {
+                "processed_segment_ids": [item.segment_id for item in segments],
+                "data": [
+                    {
+                        "segment_id": segments[0].segment_id,
+                        "source_ids": [1],
+                        "fact": "This deliberately crosses the Topic boundary.",
+                    }
+                ],
+            }
+            usage = ProviderUsage(60, 30, tier)
+        elif f"--- Topic {segments[0].segment_id} ---" in prompt:
+            content = {
+                "processed_segment_ids": [segments[0].segment_id],
+                "data": [
+                    {
+                        "segment_id": segments[0].segment_id,
+                        "source_ids": [0],
+                        "fact": "Alice stated a short fact.",
+                    }
+                ],
+            }
+            usage = ProviderUsage(11, 3, tier)
+        else:
+            content = {
+                "processed_segment_ids": [segments[1].segment_id],
+                "data": [
+                    {
+                        "segment_id": segments[1].segment_id,
+                        "source_ids": [1],
+                        "fact": "Bob stated a substantially longer durable second fact.",
+                    }
+                ],
+            }
+            usage = ProviderUsage(13, 4, tier)
+        return BatchCompletion(json.dumps(content), usage)
+
+    counter = lambda text: len(text.split())
+    config = {
+        "max_facts_per_segment": 10,
+        "reserve_output_tokens_per_segment": 64,
+        "schema_repair_max_attempts": 0,
+        "require_provider_usage": True,
+        "terminal_fallback": {
+            "enabled": True,
+            "tiers": ["small"],
+            "strategy": "failed_batch_to_singletons",
+            "max_depth": 1,
+            "context_prefix_turns": 1,
+            "discard_primary_batch_output": True,
+            "require_all_children_committed": True,
+            "count_provider_usage": True,
+            "cost_allocation": "topic_content_token_weight",
+        },
+        "buffers": {
+            "medium": {
+                "max_segments": 2,
+                "max_input_tokens": 1000,
+                "max_total_context_tokens": 2000,
+            }
+        },
+    }
+    store = FactQdrantStore(
+        "unused", "explicit_medium_singleton_recovery", 4, in_memory=True
+    )
+    generator = CandidateGenerator(
+        store=store,
+        encoder=_FakeEncoder(),
+        models={"medium": model},
+        prices={"medium": PriceSpec(1.0, 2.0)},
+        token_counters={"medium": counter},
+        completion=complete,
+        prompts={"medium": "{router_level}\n{information_score}\n{segment_text}"},
+        prompt_versions={"medium": "test-v2"},
+        extraction_config=config,
+        output_root=tmp_path,
+    )
+
+    failed = generator.generate(segments, "medium-terminal", tiers=("medium",))
+    assert failed.status == "incomplete"
+    assert failed.batch_status_counts == {"failed_terminal": 1}
+    assert failed.fact_counts["medium"] == 0
+    assert len(prompts_seen) == 1
+
+    recovered = generator.generate(
+        segments,
+        "medium-terminal",
+        resume=True,
+        recover_terminal_with_singletons=True,
+        tiers=("medium",),
+    )
+    assert recovered.status == "complete"
+    assert recovered.batch_status_counts == {"recovered_by_fallback": 1}
+    assert recovered.fact_counts["medium"] == 2
+    assert len(prompts_seen) == 3
+    assert recovered.attempt_summary["logical_api_calls"] == 3
+    assert recovered.attempt_summary["fallback_calls"] == 2
+    assert recovered.attempt_summary["terminal_recovery_calls"] == 2
+    assert recovered.attempt_summary["known_cost"] == pytest.approx(158e-6)
+    assert recovered.attempt_summary["primary_cost"] == pytest.approx(120e-6)
+    assert recovered.attempt_summary["fallback_cost"] == pytest.approx(38e-6)
+    assert recovered.attempt_summary["terminal_recovery_cost"] == pytest.approx(
+        38e-6
+    )
+
+    attempt_rows = read_sqlite_ledger(
+        tmp_path / "runs" / "medium-terminal" / "ledgers" / "run_ledger.sqlite3",
+        "attempts",
+    )
+    assert [row["call_type"] for row in attempt_rows].count("initial") == 1
+    assert [row["call_type"] for row in attempt_rows].count(
+        "terminal_recovery_singleton"
+    ) == 2
+
+    points = store.candidate_points(
+        "medium",
+        dataset_name=segments[0].dataset_name,
+        split=segments[0].split,
+        sample_id=segments[0].sample_id,
+        extraction_run_id="medium-terminal",
+        with_vectors=False,
+    )
+    assert len(points) == 2
+    assert {
+        point.payload["fallback_recovery_mode"] for point in points
+    } == {"explicit_terminal_to_singletons_v1"}
+
+    ledger_path = (
+        tmp_path / "locomo" / "train" / segments[0].segmentation_method
+        / "samples" / segments[0].sample_id / "extraction"
+        / "candidate_ledger.sqlite3"
+    )
+    segment_costs = read_sqlite_ledger(ledger_path, "segment_costs")
+    weights = [counter(segment.text) for segment in segments]
+    assert segment_costs[0]["primary_cost_weight"] == pytest.approx(
+        weights[0] / sum(weights)
+    )
+    assert sum(row["allocated_total_cost"] for row in segment_costs) == pytest.approx(
+        recovered.attempt_summary["known_cost"]
+    )
+
+    with sqlite3.connect(
+        tmp_path / "runs" / "medium-terminal" / "state.sqlite3"
+    ) as db:
+        assert db.execute("SELECT status FROM batches").fetchone()[0] == (
+            "recovered_by_fallback"
+        )
+        assert db.execute(
+            "SELECT status FROM fallback_batches ORDER BY child_index"
+        ).fetchall() == [("committed",), ("committed",)]
+    store.close()
+
+
 def test_singleton_failure_keeps_parent_atomic_and_qdrant_empty(tmp_path) -> None:
     segments = [
         replace(
@@ -1845,6 +2022,16 @@ def test_singleton_failure_keeps_parent_atomic_and_qdrant_empty(tmp_path) -> Non
         extraction_run_id="fallback-failed",
         with_vectors=False,
     ) == []
+    with pytest.raises(
+        ValueError, match="singleton children already exist"
+    ):
+        generator.generate(
+            segments,
+            "fallback-failed",
+            resume=True,
+            recover_terminal_with_singletons=True,
+            tiers=("small",),
+        )
     with pytest.raises(
         ValueError, match="cached singleton recovery refused without changing state"
     ):
