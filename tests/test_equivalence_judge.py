@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from infobudget.quality_router.equivalence_judge import (
+    parse_equivalence_decisions,
+    plan_equivalence_judging,
+    run_equivalence_judging,
+)
+from infobudget.rl_router.api import LLMResponse
+from infobudget.schemas import ModelSpec, PriceSpec
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _pair(pair_id: str = "p1") -> dict:
+    return {
+        "pair_id": pair_id,
+        "dataset_name": "locomo",
+        "split": "full",
+        "sample_id": "conv-1",
+        "segment_id": "seg-1",
+        "model_id": "model-a",
+        "candidate_fact_id": "c1",
+        "candidate_fact_text": "Alice moved.",
+        "candidate_source_turn_ids": [1],
+        "reference_fact_id": "r1",
+        "reference_fact_text": "Alice relocated.",
+        "reference_source_turn_ids": [1],
+    }
+
+
+def _model() -> ModelSpec:
+    return ModelSpec(
+        deploy="api",
+        backend="openai_compatible",
+        model_name="judge",
+        tokenizer_name="judge",
+        max_context_tokens=4096,
+        max_output_tokens=1024,
+        tensor_parallel_size=1,
+        dtype="n/a",
+    )
+
+
+def test_plan_is_read_only_and_groups_pairs(tmp_path: Path) -> None:
+    segments = tmp_path / "segments"
+    pairs = tmp_path / "pairs.jsonl"
+    prompt = tmp_path / "prompt.txt"
+    _write_jsonl(
+        segments / "segments.jsonl",
+        [
+            {
+                "dataset_name": "locomo",
+                "split": "full",
+                "sample_id": "conv-1",
+                "segment_id": "seg-1",
+                "turn_ids": [1],
+                "text": "[2023-01-01, Sun] 0.Alice: I moved.",
+            }
+        ],
+    )
+    _write_jsonl(pairs, [_pair("p1"), {**_pair("p2"), "candidate_fact_id": "c2"}])
+    prompt.write_text("Judge strictly.", encoding="utf-8")
+    result = plan_equivalence_judging(
+        segments_path=segments,
+        pairs_path=pairs,
+        pairs_manifest_path=None,
+        prompt_path=prompt,
+        model_spec=_model(),
+        price=PriceSpec(0.1, 0.2),
+        batch_size=1,
+    )
+    assert result["paid_api_called"] is False
+    assert result["pair_count"] == 2
+    assert result["batch_count"] == 2
+
+
+def test_parse_decisions_requires_exact_and_consistent_ids() -> None:
+    batch = [_pair()]
+    content = json.dumps(
+        {
+            "decisions": [
+                {
+                    "pair_id": "p1",
+                    "equivalent": True,
+                    "candidate_entailed": True,
+                    "reference_entailed": True,
+                    "same_claim": True,
+                    "reason_code": "EQUIVALENT",
+                }
+            ]
+        }
+    )
+    assert parse_equivalence_decisions(content, batch)[0]["equivalent"] is True
+    broken = json.loads(content)
+    broken["decisions"][0]["same_claim"] = False
+    with pytest.raises(ValueError, match="inconsistent"):
+        parse_equivalence_decisions(json.dumps(broken), batch)
+
+
+def test_run_exports_complete_judgments_and_resumes(tmp_path: Path) -> None:
+    segments = tmp_path / "segments"
+    pairs = tmp_path / "pairs.jsonl"
+    prompt = tmp_path / "prompt.txt"
+    output_dir = tmp_path / "judge"
+    output = tmp_path / "judgments.jsonl"
+    _write_jsonl(
+        segments / "segments.jsonl",
+        [
+            {
+                "dataset_name": "locomo",
+                "split": "full",
+                "sample_id": "conv-1",
+                "segment_id": "seg-1",
+                "turn_ids": [1],
+                "text": "[2023-01-01, Sun] 0.Alice: I moved.",
+            }
+        ],
+    )
+    _write_jsonl(pairs, [_pair()])
+    prompt.write_text("Judge strictly.", encoding="utf-8")
+
+    class FakeClient:
+        calls = 0
+
+        def complete(self, **kwargs) -> LLMResponse:
+            self.calls += 1
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "decisions": [
+                            {
+                                "pair_id": "p1",
+                                "equivalent": True,
+                                "candidate_entailed": True,
+                                "reference_entailed": True,
+                                "same_claim": True,
+                                "reason_code": "EQUIVALENT",
+                            }
+                        ]
+                    }
+                ),
+                input_tokens=100,
+                output_tokens=20,
+                latency_ms=1,
+            )
+
+    client = FakeClient()
+    kwargs = dict(
+        segments_path=segments,
+        pairs_path=pairs,
+        pairs_manifest_path=None,
+        prompt_path=prompt,
+        output_dir=output_dir,
+        output_path=output,
+        model_spec=_model(),
+        price=PriceSpec(0.1, 0.2),
+        client=client,
+        batch_size=32,
+    )
+    first = run_equivalence_judging(**kwargs)
+    second = run_equivalence_judging(**kwargs)
+    assert first["run_complete"] is True
+    assert second["run_complete"] is True
+    assert client.calls == 1
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 1

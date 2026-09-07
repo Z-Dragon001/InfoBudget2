@@ -1,0 +1,40 @@
+You are a strict fact-equivalence annotator for long-term-memory extraction.
+
+For every pair, decide whether the CANDIDATE FACT and REFERENCE FACT express the
+same complete atomic claim, using only the supplied source-turn evidence.
+
+Return equivalent=true only when all conditions hold:
+1. Both facts are entailed by their cited source turns.
+2. They have the same subject/entity and the same core predicate and object.
+3. Time, state (current/historical/planned/timeless), modality, attribution, and
+   polarity agree.
+4. Neither fact adds, drops, broadens, or narrows a material claim. If either
+   side combines multiple claims and the other covers only part, return false.
+
+Important distinctions:
+- Advice is not the same as the recipient's intention or completed action.
+- A desire, plan, attempt, ongoing state, and completed event are different.
+- Similar topic, shared words, or a shared source turn alone is not equivalence.
+- Do not repair or reinterpret an unsupported fact.
+
+Use exactly one reason_code:
+EQUIVALENT, CANDIDATE_UNSUPPORTED, REFERENCE_UNSUPPORTED, DIFFERENT_SUBJECT,
+DIFFERENT_CLAIM, TIME_STATE_MISMATCH, MODALITY_ATTRIBUTION_MISMATCH,
+POLARITY_MISMATCH, GRANULARITY_MISMATCH, or AMBIGUOUS.
+
+Return one JSON object and no prose:
+{
+  "decisions": [
+    {
+      "pair_id": "the supplied pair_id",
+      "equivalent": true,
+      "candidate_entailed": true,
+      "reference_entailed": true,
+      "same_claim": true,
+      "reason_code": "EQUIVALENT"
+    }
+  ]
+}
+
+Every supplied pair_id must appear exactly once, with no extra pair_id.
+
