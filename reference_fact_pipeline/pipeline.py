@@ -409,7 +409,7 @@ class ReferenceFactPipeline:
             "dataset_name": segment.dataset_name,
             "segment_id": segment.segment_id,
             "turn_ids": json.dumps(list(segment.turn_ids)),
-            "segment_text": _source_annotated_text(segment),
+            "segment_text": render_source_annotated_text(segment),
             **values,
         }
         rendered = template
@@ -604,7 +604,7 @@ def _effective_config_hash(
     ).hexdigest()
 
 
-def _source_annotated_text(segment: TopicSegment) -> str:
+def render_source_annotated_text(segment: TopicSegment) -> str:
     """Render one unambiguous canonical ID and remove the legacy 0-based label."""
     # A LongMemEval turn may contain paragraphs or example dialogue. Find only
     # the expected sequential legacy header (canonical turn_id - 1), preventing
@@ -640,3 +640,8 @@ def _source_annotated_text(segment: TopicSegment) -> str:
             f"{header.group('speaker').strip()}: {content}"
         )
     return "\n".join(rendered)
+
+
+# Backward-compatible private alias for older callers. New code should use the
+# public name so prompts and human-review artifacts share one renderer.
+_source_annotated_text = render_source_annotated_text
