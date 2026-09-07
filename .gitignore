@@ -39,10 +39,12 @@ desktop.ini
 
 # Project experiment outputs
 outputs/
+/output/
 results/
 qdrant_storage/
 .qdrant/
-
+# Microsoft Office temporary files
+~$*
 # Local model weights and downloaded artifacts
 models/**
 !models/
