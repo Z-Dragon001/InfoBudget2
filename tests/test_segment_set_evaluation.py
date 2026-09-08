@@ -102,9 +102,9 @@ def test_gold_units_preserve_fact_and_freeze_exact_time() -> None:
                         "claim_text": "Alice started painting.",
                         "required_time": {
                             "required": True,
-                            "normalized_value": "currently",
-                            "resolution": "current",
-                            "surface_form": "currently",
+                            "normalized_value": None,
+                            "resolution": None,
+                            "surface_form": None,
                         },
                     },
                 ],

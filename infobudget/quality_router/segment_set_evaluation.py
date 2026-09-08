@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 import uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -327,6 +328,12 @@ def parse_gold_evaluation_units(content: str, reference_row: dict[str, Any]) -> 
             required = time["required"]
             resolution = _normalize_time_resolution(time.get("resolution"))
             surface = str(time.get("surface_form") or "").strip().casefold()
+            if required and resolution is None:
+                resolution = _infer_time_resolution(
+                    time.get("normalized_value") or time.get("surface_form")
+                )
+                if resolution is None:
+                    required = False
             if (
                 not required
                 or resolution in NON_EXACT_TIME_RESOLUTIONS
@@ -501,6 +508,36 @@ def _normalize_time_resolution(value: Any) -> str | None:
     if normalized in NULL_LIKE_TIME_VALUES:
         return None
     return TIME_RESOLUTION_ALIASES.get(normalized, normalized)
+
+
+def _infer_time_resolution(value: Any) -> str | None:
+    """Infer only unmistakable time shapes; never infer from conversational state."""
+    text = str(value or "").strip().casefold()
+    if not text:
+        return None
+    if re.search(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b", text):
+        return "day"
+    if re.search(
+        r"\b(?:january|february|march|april|may|june|july|august|"
+        r"september|october|november|december)\s+\d{1,2},?\s+(?:19|20)\d{2}\b",
+        text,
+    ):
+        return "day"
+    if re.search(
+        r"\b(?:january|february|march|april|may|june|july|august|"
+        r"september|october|november|december)\s+(?:19|20)\d{2}\b",
+        text,
+    ):
+        return "month"
+    if re.fullmatch(r"(?:19|20)\d{2}", text):
+        return "year"
+    if re.search(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b", text):
+        return "time"
+    if re.search(r"\b\d+(?:\.\d+)?\s+(?:day|week|month|year)s?\b", text):
+        return "duration"
+    if re.search(r"\b(?:every|daily|weekly|monthly|yearly|\d+\s+times?)\b", text):
+        return "frequency"
+    return None
 
 
 def _gold_output_row(
