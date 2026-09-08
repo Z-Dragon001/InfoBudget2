@@ -134,6 +134,11 @@ def test_run_exports_complete_judgments_and_resumes(tmp_path: Path) -> None:
 
         def complete(self, **kwargs) -> LLMResponse:
             self.calls += 1
+            assert (
+                "<SOURCE_TURN_ID=1> [2023-01-01, Sun] Alice: I moved."
+                in kwargs["prompt"]
+            )
+            assert "0.Alice" not in kwargs["prompt"]
             return LLMResponse(
                 content=json.dumps(
                     {

@@ -19,6 +19,7 @@ from infobudget.utils.text import count_tokens
 
 
 PROMPT_VERSION = "fact_relation_judge_v2"
+EVIDENCE_RENDER_VERSION = "canonical_source_turn_v2"
 SCHEMA_VERSION = "fact_relation_judgment_v2"
 ALLOWED_RELATIONS = {
     "EQUIVALENT",
@@ -86,6 +87,7 @@ def plan_equivalence_judging(
         "prompt_sha256": file_sha256(prompt_path),
         "pairs_sha256": file_sha256(pairs_path),
         "segments_sha256": _path_digest(Path(segments_path)),
+        "evidence_render_version": EVIDENCE_RENDER_VERSION,
         "estimated_input_tokens": input_tokens,
         "reserved_max_output_tokens": reserved_output_tokens,
         "largest_estimated_batch_input_tokens": largest_input,
@@ -135,6 +137,7 @@ def run_equivalence_judging(
         "prompt_version": PROMPT_VERSION,
         "judge_model": model_spec.effective_model_name,
         "batch_size": int(batch_size),
+        "evidence_render_version": EVIDENCE_RENDER_VERSION,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "manifest.json"
@@ -596,7 +599,7 @@ def _load_segment_evidence(
                 f"cannot align source turns for {key}: ids={len(turn_ids)}, text={len(chunks)}"
             )
         result[key] = {
-            turn_id: f"<SOURCE_TURN_ID={turn_id}> {text}"
+            turn_id: _render_canonical_source_turn(turn_id, text)
             for turn_id, text in zip(turn_ids, chunks)
         }
     if not result:
@@ -614,6 +617,27 @@ def _split_turn_text(text: str) -> list[str]:
         elif line.strip():
             raise ValueError("segment text begins with an unrecognized continuation line")
     return chunks
+
+
+def _render_canonical_source_turn(turn_id: int, text: str) -> str:
+    """Remove the legacy zero-based ordinal and expose one canonical source ID."""
+    header = re.match(
+        r"^\[(?P<timestamp>[^\]\r\n]+)\]\s+"
+        r"(?P<legacy_id>\d+)\.(?P<speaker>[^:\r\n]+):\s*",
+        text,
+    )
+    if header is None:
+        raise ValueError(f"source turn {turn_id} has an unrecognized legacy header")
+    legacy_id = int(header.group("legacy_id"))
+    if legacy_id + 1 != turn_id:
+        raise ValueError(
+            f"source turn ID mismatch: canonical={turn_id}, legacy={legacy_id}"
+        )
+    content = text[header.end() :]
+    return (
+        f"<SOURCE_TURN_ID={turn_id}> [{header.group('timestamp')}] "
+        f"{header.group('speaker').strip()}: {content}"
+    )
 
 
 def _build_batches(
