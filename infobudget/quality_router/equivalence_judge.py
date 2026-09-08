@@ -230,7 +230,7 @@ def run_equivalence_judging(
             attempts=response.attempts,
         )
         try:
-            decisions, missing_ids = parse_partial_relation_decisions(
+            decisions, missing_ids, invalid_pair_errors = parse_partial_relation_decisions(
                 response.content, batch
             )
         except ValueError as exc:
@@ -262,10 +262,22 @@ def run_equivalence_judging(
                 f"latest raw response: {archive_path}; {exc}"
             ) from exc
 
-        if missing_ids:
+        retry_id_set = set(missing_ids) | set(invalid_pair_errors)
+        retry_ids = [
+            str(row["pair_id"])
+            for row in batch
+            if str(row["pair_id"]) in retry_id_set
+        ]
+        if retry_ids:
             partial_payload = json.loads(archive_path.read_text(encoding="utf-8"))
-            partial_payload["status"] = "partial_semantic_response"
+            partial_payload["status"] = (
+                "partial_semantic_response"
+                if decisions
+                else "invalid_semantic_response"
+            )
             partial_payload["missing_pair_ids"] = missing_ids
+            partial_payload["invalid_pair_errors"] = invalid_pair_errors
+            partial_payload["retry_pair_ids"] = retry_ids
             partial_payload["accepted_decision_count"] = len(decisions)
             atomic_write_json(archive_path, partial_payload)
 
@@ -284,9 +296,17 @@ def run_equivalence_judging(
                 )
             )
 
-        if missing_ids:
-            for pair_id in reversed(missing_ids):
+        if retry_ids:
+            for pair_id in reversed(retry_ids):
                 if pair_id not in completed:
+                    if len(batch) == 1:
+                        singleton_schema_retries[pair_id] += 1
+                        if singleton_schema_retries[pair_id] > 1:
+                            raise ValueError(
+                                f"judge returned two invalid singleton decisions for "
+                                f"{pair_id}; latest raw response: {archive_path}; "
+                                f"{invalid_pair_errors.get(pair_id, 'decision omitted')}"
+                            )
                     queue.appendleft([expected[pair_id]])
 
         completed_rows = ledger.read_all()
@@ -328,16 +348,22 @@ def parse_equivalence_decisions(
     content: str, batch: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Validate v2 relation decisions; the legacy function name is retained for API compatibility."""
-    result, missing = parse_partial_relation_decisions(content, batch)
-    if missing:
-        raise ValueError(f"decision ID mismatch; missing={missing[:5]}, extra=[]")
+    result, missing, invalid_pair_errors = parse_partial_relation_decisions(
+        content, batch
+    )
+    if missing or invalid_pair_errors:
+        raise ValueError(
+            "invalid decisions; "
+            f"missing={missing[:5]}, "
+            f"invalid={list(invalid_pair_errors.items())[:5]}"
+        )
     return result
 
 
 def parse_partial_relation_decisions(
     content: str, batch: list[dict[str, Any]]
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Validate every returned item and allow only omissions for targeted repair."""
+) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
+    """Return valid items while isolating omissions and pair-local validation errors."""
     try:
         payload = json.loads(content)
     except json.JSONDecodeError as exc:
@@ -345,50 +371,61 @@ def parse_partial_relation_decisions(
     if not isinstance(payload, dict) or not isinstance(payload.get("decisions"), list):
         raise ValueError("response must be an object containing a decisions array")
     expected_ids = [str(row["pair_id"]) for row in batch]
-    result: list[dict[str, Any]] = []
+    expected_set = set(expected_ids)
+    by_id: dict[str, dict[str, Any]] = {}
+    invalid_pair_errors: dict[str, str] = {}
     seen: set[str] = set()
     for index, raw in enumerate(payload["decisions"]):
         if not isinstance(raw, dict):
             raise ValueError(f"decisions[{index}] must be an object")
         pair_id = str(raw.get("pair_id") or "")
-        if not pair_id or pair_id in seen:
-            raise ValueError(f"missing or duplicate pair_id at decisions[{index}]")
-        if pair_id not in set(expected_ids):
+        if not pair_id:
+            raise ValueError(f"missing pair_id at decisions[{index}]")
+        if pair_id not in expected_set:
             raise ValueError(f"unexpected pair_id at decisions[{index}]: {pair_id}")
+        if pair_id in seen:
+            by_id.pop(pair_id, None)
+            invalid_pair_errors[pair_id] = "duplicate pair_id"
+            continue
         seen.add(pair_id)
-        flags: dict[str, bool] = {}
-        for field in (
-            "candidate_fully_grounded",
-            "reference_fully_grounded",
-            "candidate_entails_reference",
-            "reference_entails_candidate",
-        ):
-            if type(raw.get(field)) is not bool:
-                raise ValueError(f"{pair_id}: {field} must be a JSON boolean")
-            flags[field] = raw[field]
-        relation = str(raw.get("relation") or "").strip().upper()
-        if relation not in ALLOWED_RELATIONS:
-            raise ValueError(f"{pair_id}: unsupported relation {relation!r}")
-        _validate_relation(pair_id, flags, relation)
+        try:
+            flags: dict[str, bool] = {}
+            for field in (
+                "candidate_fully_grounded",
+                "reference_fully_grounded",
+                "candidate_entails_reference",
+                "reference_entails_candidate",
+            ):
+                if type(raw.get(field)) is not bool:
+                    raise ValueError(f"{pair_id}: {field} must be a JSON boolean")
+                flags[field] = raw[field]
+            relation = str(raw.get("relation") or "").strip().upper()
+            if relation not in ALLOWED_RELATIONS:
+                raise ValueError(f"{pair_id}: unsupported relation {relation!r}")
+            _validate_relation(pair_id, flags, relation)
+        except ValueError as exc:
+            invalid_pair_errors[pair_id] = str(exc)
+            continue
         strict_equivalent = relation == "EQUIVALENT"
         candidate_covers_reference = relation in {
             "EQUIVALENT",
             "CANDIDATE_CONTAINS_REFERENCE",
         }
-        result.append(
-            {
-                "pair_id": pair_id,
-                **flags,
-                "relation": relation,
-                "strict_equivalent": strict_equivalent,
-                "candidate_covers_reference": candidate_covers_reference,
-                # Compatibility alias for existing strict-equivalence readers.
-                "equivalent": strict_equivalent,
-            }
-        )
-    by_id = {row["pair_id"]: row for row in result}
+        by_id[pair_id] = {
+            "pair_id": pair_id,
+            **flags,
+            "relation": relation,
+            "strict_equivalent": strict_equivalent,
+            "candidate_covers_reference": candidate_covers_reference,
+            # Compatibility alias for existing strict-equivalence readers.
+            "equivalent": strict_equivalent,
+        }
     missing = [pair_id for pair_id in expected_ids if pair_id not in seen]
-    return [by_id[pair_id] for pair_id in expected_ids if pair_id in by_id], missing
+    return (
+        [by_id[pair_id] for pair_id in expected_ids if pair_id in by_id],
+        missing,
+        invalid_pair_errors,
+    )
 
 
 def _validate_relation(
@@ -480,7 +517,7 @@ def _recover_partial_archives(
             continue
         batch = [expected[pair_id] for pair_id in pair_ids]
         try:
-            decisions, missing_ids = parse_partial_relation_decisions(
+            decisions, missing_ids, invalid_pair_errors = parse_partial_relation_decisions(
                 str(payload.get("response_content") or ""), batch
             )
         except ValueError:
@@ -501,14 +538,20 @@ def _recover_partial_archives(
             )
             recovered_count += int(appended)
         missing_for_priority_retry.update(missing_ids)
+        missing_for_priority_retry.update(invalid_pair_errors)
         payload["status"] = "partial_semantic_response_recovered"
         payload["recovered_decision_count"] = recovered_count
         payload["missing_pair_ids"] = missing_ids
+        payload["invalid_pair_errors"] = invalid_pair_errors
+        retry_id_set = set(missing_ids) | set(invalid_pair_errors)
+        payload["retry_pair_ids"] = [
+            pair_id for pair_id in pair_ids if pair_id in retry_id_set
+        ]
         atomic_write_json(path, payload)
-        if recovered_count or missing_ids:
+        if recovered_count or missing_ids or invalid_pair_errors:
             print(
                 f"[recovery] {path.name}: recovered={recovered_count}, "
-                f"missing={len(missing_ids)}",
+                f"missing={len(missing_ids)}, invalid={len(invalid_pair_errors)}",
                 flush=True,
             )
     return missing_for_priority_retry

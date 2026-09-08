@@ -341,3 +341,76 @@ def test_run_commits_partial_response_and_retries_only_omitted_id(
     assert result["completed_decision_count"] == 2
     assert result["partial_response_count"] == 1
     assert client.calls == 2
+
+
+def test_run_retries_only_pair_with_inconsistent_relation(
+    tmp_path: Path,
+) -> None:
+    segments = tmp_path / "segments"
+    pairs = tmp_path / "pairs.jsonl"
+    prompt = tmp_path / "prompt.txt"
+    output_dir = tmp_path / "judge"
+    output = tmp_path / "judgments.jsonl"
+    first = _pair("p1")
+    second = {**_pair("p2"), "candidate_fact_id": "c2"}
+    _write_jsonl(
+        segments / "segments.jsonl",
+        [
+            {
+                "dataset_name": "locomo",
+                "split": "full",
+                "sample_id": "conv-1",
+                "segment_id": "seg-1",
+                "turn_ids": [1],
+                "text": "[2023-01-01, Sun] 0.Alice: I moved.",
+            }
+        ],
+    )
+    _write_jsonl(pairs, [first, second])
+    prompt.write_text("Judge strictly.", encoding="utf-8")
+    valid = {
+        "candidate_fully_grounded": True,
+        "reference_fully_grounded": True,
+        "candidate_entails_reference": True,
+        "reference_entails_candidate": True,
+        "relation": "EQUIVALENT",
+    }
+
+    class InconsistentThenCompleteClient:
+        calls = 0
+
+        def complete(self, **kwargs) -> LLMResponse:
+            self.calls += 1
+            if self.calls == 1:
+                decisions = [
+                    {"pair_id": "p1", **valid},
+                    {"pair_id": "p2", **valid, "relation": "UNSUPPORTED"},
+                ]
+            else:
+                assert '"pair_id": "p2"' in kwargs["prompt"]
+                assert '"pair_id": "p1"' not in kwargs["prompt"]
+                decisions = [{"pair_id": "p2", **valid}]
+            return LLMResponse(
+                content=json.dumps({"decisions": decisions}),
+                input_tokens=30,
+                output_tokens=10,
+                latency_ms=1,
+            )
+
+    client = InconsistentThenCompleteClient()
+    result = run_equivalence_judging(
+        segments_path=segments,
+        pairs_path=pairs,
+        pairs_manifest_path=None,
+        prompt_path=prompt,
+        output_dir=output_dir,
+        output_path=output,
+        model_spec=_model(),
+        price=PriceSpec(0.1, 0.2),
+        client=client,
+        batch_size=2,
+    )
+    assert result["run_complete"] is True
+    assert result["completed_decision_count"] == 2
+    assert result["partial_response_count"] == 1
+    assert client.calls == 2
