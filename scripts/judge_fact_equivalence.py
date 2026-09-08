@@ -23,7 +23,7 @@ def main() -> None:
     parser.add_argument(
         "--prompt",
         type=Path,
-        default=Path("configs/prompts/fact_relation_judge_v2.txt"),
+        default=Path("configs/prompts/fact_relation_judge_v3.txt"),
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

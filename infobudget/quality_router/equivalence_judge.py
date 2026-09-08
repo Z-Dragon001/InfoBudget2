@@ -18,17 +18,10 @@ from infobudget.schemas import ModelSpec, PriceSpec
 from infobudget.utils.text import count_tokens
 
 
-PROMPT_VERSION = "fact_relation_judge_v2"
+PROMPT_VERSION = "fact_relation_judge_v3"
 EVIDENCE_RENDER_VERSION = "canonical_source_turn_v2"
-SCHEMA_VERSION = "fact_relation_judgment_v2"
-ALLOWED_RELATIONS = {
-    "EQUIVALENT",
-    "CANDIDATE_CONTAINS_REFERENCE",
-    "REFERENCE_CONTAINS_CANDIDATE",
-    "PARTIAL_OVERLAP",
-    "DIFFERENT",
-    "UNSUPPORTED",
-}
+RELATION_DERIVATION_VERSION = "grounding_entailment_overlap_v1"
+SCHEMA_VERSION = "fact_relation_judgment_v3"
 _TURN_START = re.compile(r"^\[[^\]]+\]\s+\d+\.[^:]+:")
 _PAIR_REQUIRED = {
     "pair_id",
@@ -77,7 +70,7 @@ def plan_equivalence_judging(
             f"({model_spec.max_input_tokens})"
         )
     return {
-        "schema_version": "fact_relation_judge_plan_v2",
+        "schema_version": "fact_relation_judge_plan_v3",
         "paid_api_called": False,
         "pair_count": len(pairs),
         "batch_count": len(batches),
@@ -88,6 +81,7 @@ def plan_equivalence_judging(
         "pairs_sha256": file_sha256(pairs_path),
         "segments_sha256": _path_digest(Path(segments_path)),
         "evidence_render_version": EVIDENCE_RENDER_VERSION,
+        "relation_derivation_version": RELATION_DERIVATION_VERSION,
         "estimated_input_tokens": input_tokens,
         "reserved_max_output_tokens": reserved_output_tokens,
         "largest_estimated_batch_input_tokens": largest_input,
@@ -138,6 +132,7 @@ def run_equivalence_judging(
         "judge_model": model_spec.effective_model_name,
         "batch_size": int(batch_size),
         "evidence_render_version": EVIDENCE_RENDER_VERSION,
+        "relation_derivation_version": RELATION_DERIVATION_VERSION,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "manifest.json"
@@ -350,7 +345,7 @@ def run_equivalence_judging(
 def parse_equivalence_decisions(
     content: str, batch: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Validate v2 relation decisions; the legacy function name is retained for API compatibility."""
+    """Validate v3 primitive decisions; retain the legacy name for API compatibility."""
     result, missing, invalid_pair_errors = parse_partial_relation_decisions(
         content, batch
     )
@@ -398,14 +393,12 @@ def parse_partial_relation_decisions(
                 "reference_fully_grounded",
                 "candidate_entails_reference",
                 "reference_entails_candidate",
+                "material_overlap",
             ):
                 if type(raw.get(field)) is not bool:
                     raise ValueError(f"{pair_id}: {field} must be a JSON boolean")
                 flags[field] = raw[field]
-            relation = str(raw.get("relation") or "").strip().upper()
-            if relation not in ALLOWED_RELATIONS:
-                raise ValueError(f"{pair_id}: unsupported relation {relation!r}")
-            _validate_relation(pair_id, flags, relation)
+            relation = _derive_relation(flags)
         except ValueError as exc:
             invalid_pair_errors[pair_id] = str(exc)
             continue
@@ -418,6 +411,7 @@ def parse_partial_relation_decisions(
             "pair_id": pair_id,
             **flags,
             "relation": relation,
+            "relation_derivation_version": RELATION_DERIVATION_VERSION,
             "strict_equivalent": strict_equivalent,
             "candidate_covers_reference": candidate_covers_reference,
             # Compatibility alias for existing strict-equivalence readers.
@@ -431,9 +425,8 @@ def parse_partial_relation_decisions(
     )
 
 
-def _validate_relation(
-    pair_id: str, flags: dict[str, bool], relation: str
-) -> None:
+def _derive_relation(flags: dict[str, bool]) -> str:
+    """Derive the relation from non-redundant primitive semantic judgments."""
     grounded = (
         flags["candidate_fully_grounded"]
         and flags["reference_fully_grounded"]
@@ -441,26 +434,15 @@ def _validate_relation(
     candidate_entails = flags["candidate_entails_reference"]
     reference_entails = flags["reference_entails_candidate"]
     if not grounded:
-        if relation != "UNSUPPORTED" or candidate_entails or reference_entails:
-            raise ValueError(
-                f"{pair_id}: an ungrounded Fact requires UNSUPPORTED and false entailment flags"
-            )
-        return
-    if relation == "UNSUPPORTED":
-        raise ValueError(f"{pair_id}: fully grounded Facts cannot be UNSUPPORTED")
-    expected = {
+        return "UNSUPPORTED"
+    directional = {
         (True, True): "EQUIVALENT",
         (True, False): "CANDIDATE_CONTAINS_REFERENCE",
         (False, True): "REFERENCE_CONTAINS_CANDIDATE",
     }.get((candidate_entails, reference_entails))
-    if expected is not None and relation != expected:
-        raise ValueError(
-            f"{pair_id}: entailment directions require relation={expected}, got {relation}"
-        )
-    if expected is None and relation not in {"PARTIAL_OVERLAP", "DIFFERENT"}:
-        raise ValueError(
-            f"{pair_id}: false entailment directions require PARTIAL_OVERLAP or DIFFERENT"
-        )
+    if directional is not None:
+        return directional
+    return "PARTIAL_OVERLAP" if flags["material_overlap"] else "DIFFERENT"
 
 
 def _judgment_row(
@@ -731,7 +713,7 @@ def _archive_call(
     atomic_write_json(
         path,
         {
-            "schema_version": "fact_relation_judge_raw_call_v2",
+            "schema_version": "fact_relation_judge_raw_call_v3",
             "status": status,
             "batch_id": batch_id,
             "pair_ids": [row["pair_id"] for row in batch],
@@ -842,7 +824,7 @@ def _make_manifest(
         )
     complete = completed_count == pair_count
     return {
-        "schema_version": "fact_relation_judge_manifest_v2",
+        "schema_version": "fact_relation_judge_manifest_v3",
         **identity,
         "status": "complete" if complete else "incomplete",
         "run_complete": complete,

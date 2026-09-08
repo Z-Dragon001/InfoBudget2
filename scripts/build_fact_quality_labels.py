@@ -247,8 +247,8 @@ def _load_judge_decisions(
 
 def _validate_judge_artifact(decisions_path: Path, manifest_path: Path) -> None:
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "fact_relation_judge_manifest_v2":
-        raise ValueError("Judge manifest must use fact_relation_judge_manifest_v2")
+    if payload.get("schema_version") != "fact_relation_judge_manifest_v3":
+        raise ValueError("Judge manifest must use fact_relation_judge_manifest_v3")
     if payload.get("run_complete") is not True or payload.get("status") != "complete":
         raise ValueError("Judge manifest is not complete")
     expected = str(payload.get("output_sha256") or "")

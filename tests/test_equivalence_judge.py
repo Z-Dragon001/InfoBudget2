@@ -93,7 +93,7 @@ def test_parse_decisions_supports_asymmetric_candidate_coverage() -> None:
                     "reference_fully_grounded": True,
                     "candidate_entails_reference": True,
                     "reference_entails_candidate": False,
-                    "relation": "CANDIDATE_CONTAINS_REFERENCE",
+                    "material_overlap": True,
                 }
             ]
         }
@@ -102,9 +102,82 @@ def test_parse_decisions_supports_asymmetric_candidate_coverage() -> None:
     assert decision["strict_equivalent"] is False
     assert decision["candidate_covers_reference"] is True
     broken = json.loads(content)
-    broken["decisions"][0]["relation"] = "EQUIVALENT"
-    with pytest.raises(ValueError, match="require relation"):
+    broken["decisions"][0]["material_overlap"] = "true"
+    with pytest.raises(ValueError, match="material_overlap must be a JSON boolean"):
         parse_equivalence_decisions(json.dumps(broken), batch)
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected_relation"),
+    [
+        (
+            {
+                "candidate_fully_grounded": False,
+                "reference_fully_grounded": True,
+                "candidate_entails_reference": False,
+                "reference_entails_candidate": False,
+                "material_overlap": False,
+            },
+            "UNSUPPORTED",
+        ),
+        (
+            {
+                "candidate_fully_grounded": True,
+                "reference_fully_grounded": True,
+                "candidate_entails_reference": True,
+                "reference_entails_candidate": True,
+                "material_overlap": True,
+            },
+            "EQUIVALENT",
+        ),
+        (
+            {
+                "candidate_fully_grounded": True,
+                "reference_fully_grounded": True,
+                "candidate_entails_reference": True,
+                "reference_entails_candidate": False,
+                "material_overlap": True,
+            },
+            "CANDIDATE_CONTAINS_REFERENCE",
+        ),
+        (
+            {
+                "candidate_fully_grounded": True,
+                "reference_fully_grounded": True,
+                "candidate_entails_reference": False,
+                "reference_entails_candidate": True,
+                "material_overlap": True,
+            },
+            "REFERENCE_CONTAINS_CANDIDATE",
+        ),
+        (
+            {
+                "candidate_fully_grounded": True,
+                "reference_fully_grounded": True,
+                "candidate_entails_reference": False,
+                "reference_entails_candidate": False,
+                "material_overlap": True,
+            },
+            "PARTIAL_OVERLAP",
+        ),
+        (
+            {
+                "candidate_fully_grounded": True,
+                "reference_fully_grounded": True,
+                "candidate_entails_reference": False,
+                "reference_entails_candidate": False,
+                "material_overlap": False,
+            },
+            "DIFFERENT",
+        ),
+    ],
+)
+def test_parse_decisions_derives_all_relations(
+    fields: dict[str, bool], expected_relation: str
+) -> None:
+    content = json.dumps({"decisions": [{"pair_id": "p1", **fields}]})
+    decision = parse_equivalence_decisions(content, [_pair()])[0]
+    assert decision["relation"] == expected_relation
 
 
 def test_run_exports_complete_judgments_and_resumes(tmp_path: Path) -> None:
@@ -149,7 +222,7 @@ def test_run_exports_complete_judgments_and_resumes(tmp_path: Path) -> None:
                                 "reference_fully_grounded": True,
                                 "candidate_entails_reference": True,
                                 "reference_entails_candidate": True,
-                                "relation": "EQUIVALENT",
+                                "material_overlap": True,
                             }
                         ]
                     }
@@ -211,7 +284,7 @@ def test_run_recovers_valid_archived_decisions_and_retries_only_missing_id(
         "reference_fully_grounded": True,
         "candidate_entails_reference": True,
         "reference_entails_candidate": True,
-        "relation": "EQUIVALENT",
+        "material_overlap": True,
     }
     raw_dir = output_dir / "raw_calls"
     raw_dir.mkdir(parents=True)
@@ -319,7 +392,7 @@ def test_run_commits_partial_response_and_retries_only_omitted_id(
                                 "reference_fully_grounded": True,
                                 "candidate_entails_reference": True,
                                 "reference_entails_candidate": True,
-                                "relation": "EQUIVALENT",
+                                "material_overlap": True,
                             }
                         ]
                     }
@@ -348,7 +421,7 @@ def test_run_commits_partial_response_and_retries_only_omitted_id(
     assert client.calls == 2
 
 
-def test_run_retries_only_pair_with_inconsistent_relation(
+def test_run_retries_only_pair_with_invalid_primitive_field(
     tmp_path: Path,
 ) -> None:
     segments = tmp_path / "segments"
@@ -378,7 +451,7 @@ def test_run_retries_only_pair_with_inconsistent_relation(
         "reference_fully_grounded": True,
         "candidate_entails_reference": True,
         "reference_entails_candidate": True,
-        "relation": "EQUIVALENT",
+        "material_overlap": True,
     }
 
     class InconsistentThenCompleteClient:
@@ -389,7 +462,7 @@ def test_run_retries_only_pair_with_inconsistent_relation(
             if self.calls == 1:
                 decisions = [
                     {"pair_id": "p1", **valid},
-                    {"pair_id": "p2", **valid, "relation": "UNSUPPORTED"},
+                    {"pair_id": "p2", **valid, "material_overlap": "true"},
                 ]
             else:
                 assert '"pair_id": "p2"' in kwargs["prompt"]
