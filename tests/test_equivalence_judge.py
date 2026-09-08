@@ -173,3 +173,171 @@ def test_run_exports_complete_judgments_and_resumes(tmp_path: Path) -> None:
     assert second["run_complete"] is True
     assert client.calls == 1
     assert len(output.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_run_recovers_valid_archived_decisions_and_retries_only_missing_id(
+    tmp_path: Path,
+) -> None:
+    segments = tmp_path / "segments"
+    pairs = tmp_path / "pairs.jsonl"
+    prompt = tmp_path / "prompt.txt"
+    output_dir = tmp_path / "judge"
+    output = tmp_path / "judgments.jsonl"
+    first = _pair("p1")
+    second = {**_pair("p2"), "candidate_fact_id": "c2"}
+    _write_jsonl(
+        segments / "segments.jsonl",
+        [
+            {
+                "dataset_name": "locomo",
+                "split": "full",
+                "sample_id": "conv-1",
+                "segment_id": "seg-1",
+                "turn_ids": [1],
+                "text": "[2023-01-01, Sun] 0.Alice: I moved.",
+            }
+        ],
+    )
+    _write_jsonl(pairs, [first, second])
+    prompt.write_text("Judge strictly.", encoding="utf-8")
+    archived_decision = {
+        "pair_id": "p1",
+        "candidate_fully_grounded": True,
+        "reference_fully_grounded": True,
+        "candidate_entails_reference": True,
+        "reference_entails_candidate": True,
+        "relation": "EQUIVALENT",
+    }
+    raw_dir = output_dir / "raw_calls"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "old_partial.json").write_text(
+        json.dumps(
+            {
+                "status": "invalid_semantic_response",
+                "batch_id": "old-batch",
+                "pair_ids": ["p1", "p2"],
+                "response_content": json.dumps(
+                    {"decisions": [archived_decision]}
+                ),
+                "archived_at": "2026-09-08T00:00:00+00:00",
+                "usage": {"input_tokens": 100, "output_tokens": 20},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class MissingOnlyClient:
+        calls = 0
+
+        def complete(self, **kwargs) -> LLMResponse:
+            self.calls += 1
+            assert '"pair_id": "p2"' in kwargs["prompt"]
+            assert '"pair_id": "p1"' not in kwargs["prompt"]
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "decisions": [
+                            {
+                                **archived_decision,
+                                "pair_id": "p2",
+                            }
+                        ]
+                    }
+                ),
+                input_tokens=30,
+                output_tokens=10,
+                latency_ms=1,
+            )
+
+    client = MissingOnlyClient()
+    result = run_equivalence_judging(
+        segments_path=segments,
+        pairs_path=pairs,
+        pairs_manifest_path=None,
+        prompt_path=prompt,
+        output_dir=output_dir,
+        output_path=output,
+        model_spec=_model(),
+        price=PriceSpec(0.1, 0.2),
+        client=client,
+        batch_size=2,
+    )
+    assert result["run_complete"] is True
+    assert result["completed_decision_count"] == 2
+    assert client.calls == 1
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert [row["pair_id"] for row in rows] == ["p1", "p2"]
+
+
+def test_run_commits_partial_response_and_retries_only_omitted_id(
+    tmp_path: Path,
+) -> None:
+    segments = tmp_path / "segments"
+    pairs = tmp_path / "pairs.jsonl"
+    prompt = tmp_path / "prompt.txt"
+    output_dir = tmp_path / "judge"
+    output = tmp_path / "judgments.jsonl"
+    first = _pair("p1")
+    second = {**_pair("p2"), "candidate_fact_id": "c2"}
+    _write_jsonl(
+        segments / "segments.jsonl",
+        [
+            {
+                "dataset_name": "locomo",
+                "split": "full",
+                "sample_id": "conv-1",
+                "segment_id": "seg-1",
+                "turn_ids": [1],
+                "text": "[2023-01-01, Sun] 0.Alice: I moved.",
+            }
+        ],
+    )
+    _write_jsonl(pairs, [first, second])
+    prompt.write_text("Judge strictly.", encoding="utf-8")
+
+    class PartialThenCompleteClient:
+        calls = 0
+
+        def complete(self, **kwargs) -> LLMResponse:
+            self.calls += 1
+            pair_id = "p1" if self.calls == 1 else "p2"
+            if self.calls == 2:
+                assert '"pair_id": "p2"' in kwargs["prompt"]
+                assert '"pair_id": "p1"' not in kwargs["prompt"]
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "decisions": [
+                            {
+                                "pair_id": pair_id,
+                                "candidate_fully_grounded": True,
+                                "reference_fully_grounded": True,
+                                "candidate_entails_reference": True,
+                                "reference_entails_candidate": True,
+                                "relation": "EQUIVALENT",
+                            }
+                        ]
+                    }
+                ),
+                input_tokens=30,
+                output_tokens=10,
+                latency_ms=1,
+            )
+
+    client = PartialThenCompleteClient()
+    result = run_equivalence_judging(
+        segments_path=segments,
+        pairs_path=pairs,
+        pairs_manifest_path=None,
+        prompt_path=prompt,
+        output_dir=output_dir,
+        output_path=output,
+        model_spec=_model(),
+        price=PriceSpec(0.1, 0.2),
+        client=client,
+        batch_size=2,
+    )
+    assert result["run_complete"] is True
+    assert result["completed_decision_count"] == 2
+    assert result["partial_response_count"] == 1
+    assert client.calls == 2

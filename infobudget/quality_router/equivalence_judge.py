@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -147,6 +147,15 @@ def run_equivalence_judging(
     expected = {str(row["pair_id"]): row for row in pairs}
     completed_rows = ledger.read_all()
     completed = _validate_completed_rows(completed_rows, expected)
+    recovery_missing = _recover_partial_archives(
+        output_dir=output_dir,
+        expected=expected,
+        ledger=ledger,
+        model_spec=model_spec,
+        identity=identity,
+    )
+    completed_rows = ledger.read_all()
+    completed = _validate_completed_rows(completed_rows, expected)
     manifest = _make_manifest(
         identity=identity,
         output_dir=output_dir,
@@ -157,10 +166,26 @@ def run_equivalence_judging(
     )
     atomic_write_json(manifest_path, manifest)
 
-    remaining = [row for row in pairs if row["pair_id"] not in completed]
-    batches = _build_batches(remaining, batch_size=batch_size)
-    selected = batches if max_batches is None else batches[:max_batches]
-    for batch_number, batch in enumerate(selected, start=1):
+    priority_ids = [
+        str(row["pair_id"])
+        for row in pairs
+        if row["pair_id"] in recovery_missing and row["pair_id"] not in completed
+    ]
+    priority_set = set(priority_ids)
+    remaining = [
+        row
+        for row in pairs
+        if row["pair_id"] not in completed and row["pair_id"] not in priority_set
+    ]
+    queue = deque(
+        [[expected[pair_id]] for pair_id in priority_ids]
+        + _build_batches(remaining, batch_size=batch_size)
+    )
+    call_number = 0
+    singleton_schema_retries: Counter[str] = Counter()
+    while queue and (max_batches is None or call_number < max_batches):
+        batch = queue.popleft()
+        call_number += 1
         prompt = _render_prompt(prompt_text, batch, evidence)
         max_new_tokens = _max_new_tokens(len(batch), model_spec)
         batch_id = _batch_id(batch)
@@ -205,40 +230,64 @@ def run_equivalence_judging(
             attempts=response.attempts,
         )
         try:
-            decisions = parse_equivalence_decisions(response.content, batch)
+            decisions, missing_ids = parse_partial_relation_decisions(
+                response.content, batch
+            )
         except ValueError as exc:
             failed_payload = json.loads(archive_path.read_text(encoding="utf-8"))
             failed_payload["status"] = "invalid_semantic_response"
             failed_payload["validation_error"] = str(exc)
             atomic_write_json(archive_path, failed_payload)
+            if len(batch) > 1:
+                midpoint = max(1, len(batch) // 2)
+                retry_batches = [batch[:midpoint], batch[midpoint:]]
+                for retry_batch in reversed([item for item in retry_batches if item]):
+                    queue.appendleft(retry_batch)
+                print(
+                    f"[repair] {batch_id}: invalid response; split {len(batch)} "
+                    f"pairs into {[len(item) for item in retry_batches if item]}",
+                    flush=True,
+                )
+                continue
+            singleton_schema_retries[batch_id] += 1
+            if singleton_schema_retries[batch_id] <= 1:
+                queue.appendleft(batch)
+                print(
+                    f"[repair] {batch_id}: invalid singleton response; retrying once",
+                    flush=True,
+                )
+                continue
             raise ValueError(
-                f"judge returned an invalid batch {batch_id}; raw response: {archive_path}; {exc}"
+                f"judge returned two invalid singleton responses for {batch_id}; "
+                f"latest raw response: {archive_path}; {exc}"
             ) from exc
+
+        if missing_ids:
+            partial_payload = json.loads(archive_path.read_text(encoding="utf-8"))
+            partial_payload["status"] = "partial_semantic_response"
+            partial_payload["missing_pair_ids"] = missing_ids
+            partial_payload["accepted_decision_count"] = len(decisions)
+            atomic_write_json(archive_path, partial_payload)
 
         batch_lookup = {str(row["pair_id"]): row for row in batch}
         judged_at = _utc_now()
         for decision in decisions:
             source = batch_lookup[decision["pair_id"]]
-            row = {
-                "schema_version": SCHEMA_VERSION,
-                "pair_id": decision["pair_id"],
-                "dataset": source.get("dataset") or source["dataset_name"],
-                "dataset_name": source["dataset_name"],
-                "split": source["split"],
-                "sample_id": source["sample_id"],
-                "segment_id": source["segment_id"],
-                "model_id": source["model_id"],
-                "candidate_fact_id": source["candidate_fact_id"],
-                "reference_fact_id": source["reference_fact_id"],
-                **decision,
-                "judge_model": model_spec.effective_model_name,
-                "prompt_version": PROMPT_VERSION,
-                "prompt_sha256": identity["prompt_sha256"],
-                "pairs_sha256": identity["pairs_sha256"],
-                "judge_batch_id": batch_id,
-                "judged_at": judged_at,
-            }
-            ledger.append(row)
+            ledger.append(
+                _judgment_row(
+                    source=source,
+                    decision=decision,
+                    model_spec=model_spec,
+                    identity=identity,
+                    batch_id=batch_id,
+                    judged_at=judged_at,
+                )
+            )
+
+        if missing_ids:
+            for pair_id in reversed(missing_ids):
+                if pair_id not in completed:
+                    queue.appendleft([expected[pair_id]])
 
         completed_rows = ledger.read_all()
         completed = _validate_completed_rows(completed_rows, expected)
@@ -252,8 +301,8 @@ def run_equivalence_judging(
         )
         atomic_write_json(manifest_path, manifest)
         print(
-            f"[{batch_number}/{len(selected)}] {batch_id}: "
-            f"{len(batch)} decisions committed; total={len(completed)}/{len(pairs)}",
+            f"[call {call_number}] {batch_id}: {len(decisions)}/{len(batch)} "
+            f"decisions committed; total={len(completed)}/{len(pairs)}",
             flush=True,
         )
 
@@ -279,6 +328,16 @@ def parse_equivalence_decisions(
     content: str, batch: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Validate v2 relation decisions; the legacy function name is retained for API compatibility."""
+    result, missing = parse_partial_relation_decisions(content, batch)
+    if missing:
+        raise ValueError(f"decision ID mismatch; missing={missing[:5]}, extra=[]")
+    return result
+
+
+def parse_partial_relation_decisions(
+    content: str, batch: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Validate every returned item and allow only omissions for targeted repair."""
     try:
         payload = json.loads(content)
     except json.JSONDecodeError as exc:
@@ -294,6 +353,8 @@ def parse_equivalence_decisions(
         pair_id = str(raw.get("pair_id") or "")
         if not pair_id or pair_id in seen:
             raise ValueError(f"missing or duplicate pair_id at decisions[{index}]")
+        if pair_id not in set(expected_ids):
+            raise ValueError(f"unexpected pair_id at decisions[{index}]: {pair_id}")
         seen.add(pair_id)
         flags: dict[str, bool] = {}
         for field in (
@@ -325,12 +386,9 @@ def parse_equivalence_decisions(
                 "equivalent": strict_equivalent,
             }
         )
-    if set(expected_ids) != seen or len(result) != len(expected_ids):
-        missing = sorted(set(expected_ids) - seen)
-        extra = sorted(seen - set(expected_ids))
-        raise ValueError(f"decision ID mismatch; missing={missing[:5]}, extra={extra[:5]}")
     by_id = {row["pair_id"]: row for row in result}
-    return [by_id[pair_id] for pair_id in expected_ids]
+    missing = [pair_id for pair_id in expected_ids if pair_id not in seen]
+    return [by_id[pair_id] for pair_id in expected_ids if pair_id in by_id], missing
 
 
 def _validate_relation(
@@ -363,6 +421,97 @@ def _validate_relation(
         raise ValueError(
             f"{pair_id}: false entailment directions require PARTIAL_OVERLAP or DIFFERENT"
         )
+
+
+def _judgment_row(
+    *,
+    source: dict[str, Any],
+    decision: dict[str, Any],
+    model_spec: ModelSpec,
+    identity: dict[str, Any],
+    batch_id: str,
+    judged_at: str,
+    recovered_from_raw_archive: str = "",
+) -> dict[str, Any]:
+    row = {
+        "schema_version": SCHEMA_VERSION,
+        "pair_id": decision["pair_id"],
+        "dataset": source.get("dataset") or source["dataset_name"],
+        "dataset_name": source["dataset_name"],
+        "split": source["split"],
+        "sample_id": source["sample_id"],
+        "segment_id": source["segment_id"],
+        "model_id": source["model_id"],
+        "candidate_fact_id": source["candidate_fact_id"],
+        "reference_fact_id": source["reference_fact_id"],
+        **decision,
+        "judge_model": model_spec.effective_model_name,
+        "prompt_version": PROMPT_VERSION,
+        "prompt_sha256": identity["prompt_sha256"],
+        "pairs_sha256": identity["pairs_sha256"],
+        "judge_batch_id": batch_id,
+        "judged_at": judged_at,
+    }
+    if recovered_from_raw_archive:
+        row["recovered_from_raw_archive"] = recovered_from_raw_archive
+    return row
+
+
+def _recover_partial_archives(
+    *,
+    output_dir: Path,
+    expected: dict[str, dict[str, Any]],
+    ledger: SqliteLedger,
+    model_spec: ModelSpec,
+    identity: dict[str, Any],
+) -> set[str]:
+    """Salvage valid decisions from archived responses that omitted some IDs."""
+    missing_for_priority_retry: set[str] = set()
+    raw_dir = output_dir / "raw_calls"
+    for path in sorted(raw_dir.glob("*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("status") not in {
+            "invalid_semantic_response",
+            "partial_semantic_response",
+        }:
+            continue
+        pair_ids = [str(value) for value in payload.get("pair_ids", ())]
+        if not pair_ids or any(pair_id not in expected for pair_id in pair_ids):
+            continue
+        batch = [expected[pair_id] for pair_id in pair_ids]
+        try:
+            decisions, missing_ids = parse_partial_relation_decisions(
+                str(payload.get("response_content") or ""), batch
+            )
+        except ValueError:
+            continue
+        recovered_count = 0
+        for decision in decisions:
+            source = expected[decision["pair_id"]]
+            appended = ledger.append(
+                _judgment_row(
+                    source=source,
+                    decision=decision,
+                    model_spec=model_spec,
+                    identity=identity,
+                    batch_id=str(payload.get("batch_id") or _batch_id(batch)),
+                    judged_at=str(payload.get("archived_at") or _utc_now()),
+                    recovered_from_raw_archive=str(path.resolve()),
+                )
+            )
+            recovered_count += int(appended)
+        missing_for_priority_retry.update(missing_ids)
+        payload["status"] = "partial_semantic_response_recovered"
+        payload["recovered_decision_count"] = recovered_count
+        payload["missing_pair_ids"] = missing_ids
+        atomic_write_json(path, payload)
+        if recovered_count or missing_ids:
+            print(
+                f"[recovery] {path.name}: recovered={recovered_count}, "
+                f"missing={len(missing_ids)}",
+                flush=True,
+            )
+    return missing_for_priority_retry
 
 
 def _load_pairs(path: Path) -> list[dict[str, Any]]:
@@ -588,7 +737,18 @@ def _make_manifest(
     raw_calls = []
     for path in sorted((output_dir / "raw_calls").glob("*.json")):
         raw_calls.append(json.loads(path.read_text(encoding="utf-8")))
-    successful = [row for row in raw_calls if row.get("status") in {"response_received", "invalid_semantic_response"} and isinstance(row.get("usage"), dict)]
+    provider_responses = {
+        "response_received",
+        "invalid_semantic_response",
+        "partial_semantic_response",
+        "partial_semantic_response_recovered",
+    }
+    successful = [
+        row
+        for row in raw_calls
+        if row.get("status") in provider_responses
+        and isinstance(row.get("usage"), dict)
+    ]
     input_tokens = sum(int(row["usage"].get("input_tokens") or 0) for row in successful)
     output_tokens = sum(int(row["usage"].get("output_tokens") or 0) for row in successful)
     relation_counts: Counter[str] = Counter()
@@ -624,6 +784,23 @@ def _make_manifest(
         "remaining_decision_count": pair_count - completed_count,
         "logical_api_call_count": len(raw_calls),
         "successful_response_count": len(successful),
+        "partial_response_count": sum(
+            int(
+                row.get("status")
+                in {
+                    "partial_semantic_response",
+                    "partial_semantic_response_recovered",
+                }
+            )
+            for row in raw_calls
+        ),
+        "invalid_response_count": sum(
+            int(row.get("status") == "invalid_semantic_response")
+            for row in raw_calls
+        ),
+        "transport_failed_call_count": sum(
+            int(row.get("status") == "transport_failed") for row in raw_calls
+        ),
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "input_cost": input_tokens * price.official_price_in_per_1m / 1_000_000,
