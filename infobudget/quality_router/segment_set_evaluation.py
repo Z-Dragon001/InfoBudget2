@@ -591,7 +591,13 @@ def _archive_call(output_dir: Path, segment_id: str, prompt: str, status: str, c
 
 
 def _usage_totals(output_dir: Path) -> dict[str, int]:
-    totals = Counter()
+    totals: Counter[str] = Counter(
+        {
+            "logical_api_call_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+    )
     raw = output_dir / "raw_calls"
     for path in raw.glob("*.json") if raw.is_dir() else ():
         row = json.loads(path.read_text(encoding="utf-8"))
@@ -599,7 +605,11 @@ def _usage_totals(output_dir: Path) -> dict[str, int]:
         totals["logical_api_call_count"] += 1
         totals["input_tokens"] += int(usage.get("input_tokens") or 0)
         totals["output_tokens"] += int(usage.get("output_tokens") or 0)
-    return dict(totals)
+    return {
+        "logical_api_call_count": totals["logical_api_call_count"],
+        "input_tokens": totals["input_tokens"],
+        "output_tokens": totals["output_tokens"],
+    }
 
 
 def _require_resume_identity(path: Path, identity: dict[str, Any]) -> None:

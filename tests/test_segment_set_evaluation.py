@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from infobudget.quality_router.segment_set_evaluation import (
     _take_stratified,
+    _usage_totals,
     parse_gold_evaluation_units,
     parse_segment_set_judgment,
 )
@@ -183,3 +185,11 @@ def test_pilot_selection_round_robins_conversations() -> None:
     assert [row["sample_id"] for row in selected] == [
         "conv-1", "conv-2", "conv-3", "conv-1", "conv-2", "conv-3"
     ]
+
+
+def test_empty_raw_call_directory_has_zero_usage(tmp_path: Path) -> None:
+    assert _usage_totals(tmp_path) == {
+        "logical_api_call_count": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+    }
