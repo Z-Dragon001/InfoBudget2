@@ -110,7 +110,7 @@ Gold Fact: |####--------------------| 180/1054 segments elapsed=... eta=... item
   --output <quality-labels.jsonl>
 ```
 
-路由训练仍采用单一标量目标，但主目标改为 `silver_gold_coverage`：只要 Candidate 完全有据且能够蕴含 Gold Fact，即可覆盖该 Gold。每条标签同时保留要求双向等价的 `silver_strict_fact_f1`，用于原子性诊断、消融和错误分析，不作为默认训练目标。
+路由训练采用 Segment 级集合评价：同一片段的完整 Candidate Fact 集合覆盖冻结的 Gold claim 单元。当前协议不检查来源 Turn ID，也不惩罚冗余；若 Gold claim 含明确时间，Candidate 必须保留同等精度时间。主目标为严格 Candidate 正确率与严格 Gold claim 召回率组成的 `set_quality_f2`。
 
 ## 数据集特定规则
 

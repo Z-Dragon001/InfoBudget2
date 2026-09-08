@@ -12,18 +12,12 @@ from infobudget.quality_router.counterfactual import (
     aggregate_segment_usage,
     counterfactual_consistency,
 )
-from infobudget.quality_router.labeling import (
-    build_quality_label,
-    score_fact_sets,
-    score_gold_coverage,
-)
 from infobudget.quality_router.model import (
     CapabilityConditionedQualityScorer,
     QualityFeatureBuilder,
 )
 from infobudget.quality_router.schemas import (
     CAPABILITY_DIMENSIONS,
-    AtomicFact,
     FactQualityLabel,
     FactSetKey,
     ModelCapabilityProfile,
@@ -80,94 +74,13 @@ def _segment(segment_id: str = "segment-1") -> TopicSegment:
 
 def test_quality_config_and_minilm_feature_dimension() -> None:
     config = QualityRouterConfig.load("configs/quality_router.yaml")
-    assert config.values["label_name"] == "silver_gold_coverage"
+    assert config.values["label_name"] == "set_quality_f2"
     builder = QualityFeatureBuilder(FakeEncoder())
     builder.fit([_segment()])
     segment_features = builder.build_segment_features([_segment()])
     pair_features = builder.combine(segment_features, [_profile()])
     assert segment_features.shape == (1, 390)
     assert pair_features.shape == (1, 397)
-
-
-def test_strict_fact_f1_uses_one_to_one_source_grounded_matching() -> None:
-    references = [
-        AtomicFact("r1", "Alice moved to Paris.", (1,)),
-        AtomicFact("r2", "Bob lives in Rome.", (2,)),
-    ]
-    candidates = [
-        AtomicFact("c1", "Alice moved to Paris.", (1,)),
-        AtomicFact("c2", "Alice moved to Paris.", (1,)),
-        AtomicFact("c3", "Bob lives in Rome.", (99,)),
-    ]
-    result = score_fact_sets(candidates, references, valid_source_turn_ids={1, 2})
-    assert (result.true_positive, result.false_positive, result.false_negative) == (1, 2, 1)
-    assert result.f1 == pytest.approx(0.4)
-
-
-def test_evidence_grounded_semantic_f1_can_accept_nonoverlapping_sources() -> None:
-    references = [AtomicFact("r1", "Alice moved to Paris.", (2,))]
-    candidates = [AtomicFact("c1", "Alice relocated to Paris.", (1,))]
-    result = score_fact_sets(
-        candidates,
-        references,
-        valid_source_turn_ids={1, 2},
-        equivalent=lambda candidate, reference: True,
-        require_source_overlap=False,
-    )
-    assert (result.true_positive, result.false_positive, result.false_negative) == (1, 0, 0)
-
-
-def test_compound_candidate_can_cover_gold_without_strict_equivalence() -> None:
-    references = [AtomicFact("r1", "Melanie was injured last month.", (362,))]
-    candidates = [
-        AtomicFact(
-            "c1",
-            "Melanie was injured and has been painting to keep busy.",
-            (362, 364),
-        )
-    ]
-    strict = score_fact_sets(
-        candidates,
-        references,
-        valid_source_turn_ids={362, 364},
-        equivalent=lambda candidate, reference: False,
-        require_source_overlap=False,
-    )
-    coverage = score_gold_coverage(
-        candidates,
-        references,
-        valid_source_turn_ids={362, 364},
-        covers_reference=lambda candidate, reference: True,
-    )
-    assert strict.f1 == 0.0
-    assert coverage.gold_coverage == 1.0
-    assert coverage.coverage_pairs == (("c1", "r1"),)
-
-    label, strict_result, coverage_result = build_quality_label(
-        key=FactSetKey("dataset", "full", "sample", "segment"),
-        model_id="model-a",
-        profile_id="profile-model-a",
-        candidates=candidates,
-        references=references,
-        valid_source_turn_ids={362, 364},
-        candidate_extraction_run_id="run-1",
-        equivalent=lambda candidate, reference: False,
-        covers_reference=lambda candidate, reference: True,
-        require_source_overlap=False,
-        primary_label_name="silver_gold_coverage",
-    )
-    assert strict_result.f1 == 0.0
-    assert coverage_result.gold_coverage == 1.0
-    assert label.silver_strict_fact_f1 == 0.0
-    assert label.silver_gold_coverage == 1.0
-    assert label.primary_quality == 1.0
-    restored = FactQualityLabel.from_dict(label.to_dict())
-    assert restored.primary_quality == 1.0
-
-
-def test_empty_fact_sets_are_perfect_only_when_both_are_empty() -> None:
-    assert score_fact_sets([], [], valid_source_turn_ids={1}).f1 == 1.0
-    assert score_fact_sets([], [AtomicFact("r", "fact", (1,))], valid_source_turn_ids={1}).f1 == 0.0
 
 
 def test_quality_checkpoint_freezes_embedding_and_memoryprint_schema(tmp_path) -> None:

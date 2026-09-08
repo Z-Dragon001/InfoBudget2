@@ -11,10 +11,11 @@ For segment `d` and candidate model `m`, the scorer receives:
 - six structural segment features fitted only on the training split;
 - a seven-dimensional frozen MemoryPrint for model `m`.
 
-The concatenated 397-dimensional feature predicts one scalar
-`silver_gold_coverage`. A fully grounded compound Candidate can cover a narrower Gold Fact
-when the Candidate entails it. The same artifact retains `silver_strict_fact_f1`, which
-requires bidirectional equivalence and is used for diagnostics and ablations. The scorer
+The concatenated 397-dimensional feature predicts one scalar `set_quality_f2`. This label
+combines strict Candidate semantic precision with strict Gold-claim recall, weighting
+recall twice. A compound Candidate may cover multiple Gold claim units, and multiple
+Candidates may jointly cover a compound Gold Fact. Exact time stated by a Gold claim is a
+hard coverage gate: omission or lower time precision cannot receive strict coverage. The scorer
 does not predict seven quality heads, use model identity as an
 action class, consume QA correctness during training, or optimize an RL reward.
 
@@ -32,14 +33,16 @@ without retraining it.
 ## Required artifacts
 
 1. `model_capabilities.json`: validated by `configs/model_capabilities.schema.json`.
-2. `reference_facts.jsonl`: one frozen silver reference Fact set per segment.
-3. candidate Fact JSONL or a Qdrant human-inspection export.
-4. `fact_relation_judgments.jsonl`: fixed-Judge grounding, bidirectional entailment, and
-   relation decisions for candidate/reference Fact pairs.
-5. `fact_quality_labels.jsonl`: scalar labels built by
+2. `reference_facts.jsonl`: the reviewed, frozen Gold Fact set per segment.
+3. `gold_evaluation_units.jsonl`: frozen Gold claim units and explicit-time requirements.
+4. candidate Fact JSONL or a Qdrant human-inspection export.
+5. `segment_fact_set_judgments.jsonl`: one decision per Segment containing anonymous
+   Candidate-set correctness and Gold-claim coverage. Source IDs and redundancy are outside
+   this protocol.
+6. `fact_quality_labels.jsonl`: deterministic scalar labels built by
    `scripts/build_fact_quality_labels.py`.
-6. separate train and validation label files whose sample IDs do not overlap.
-7. `segment_model_costs.jsonl`: one non-negative absolute cost for each segment/model pair.
+7. separate train and validation label files whose sample IDs do not overlap.
+8. `segment_model_costs.jsonl`: one non-negative absolute cost for each segment/model pair.
 
 The training CLI refuses sample-level train/validation overlap. A checkpoint freezes the
 embedding name/dimension, structural scaler, MemoryPrint dimension order, label hashes and

@@ -19,6 +19,7 @@ CAPABILITY_DIMENSIONS: tuple[str, ...] = (
 QUALITY_LABEL_NAMES: tuple[str, ...] = (
     "silver_strict_fact_f1",
     "silver_gold_coverage",
+    "set_quality_f2",
 )
 
 
@@ -121,6 +122,7 @@ class FactQualityLabel:
     reference_set_hash: str
     candidate_extraction_run_id: str
     label_version: str = "silver_dual_quality_v2"
+    set_quality_f2: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -150,6 +152,9 @@ class FactQualityLabel:
         gold_coverage = float(value.get("silver_gold_coverage", value.get("recall", 0.0)))
         if not 0.0 <= gold_coverage <= 1.0:
             raise ValueError("silver_gold_coverage must be in [0, 1]")
+        set_quality_f2 = float(value.get("set_quality_f2", quality))
+        if not 0.0 <= set_quality_f2 <= 1.0:
+            raise ValueError("set_quality_f2 must be in [0, 1]")
         primary_label_name = str(
             value.get("primary_label_name") or "silver_strict_fact_f1"
         )
@@ -181,6 +186,7 @@ class FactQualityLabel:
                 value.get("candidate_extraction_run_id"), "candidate_extraction_run_id"
             ),
             label_version=str(value.get("label_version") or "silver_f1_v1"),
+            set_quality_f2=set_quality_f2,
         )
 
 

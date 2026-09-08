@@ -175,8 +175,8 @@ The primary method is now a supervised scalar scorer rather than a fixed three-c
 actor-critic. It concatenates a 384-dimensional
 `sentence-transformers/all-MiniLM-L6-v2` segment embedding, six leakage-safe structural
 features, and the frozen seven-dimensional MemoryPrint. The resulting 397-dimensional
-input predicts one `silver_gold_coverage` value for each `(segment, model)` pair. Every
-label row also preserves `silver_strict_fact_f1` as an atomicity-sensitive diagnostic. A
+input predicts one `set_quality_f2` value for each `(segment, model)` pair. The target is
+computed from strict Candidate correctness and exact-time-gated Gold claim recall. A
 deterministic multiple-choice budget optimizer then selects exactly one model per segment.
 The previous RL implementation remains available as an experimental baseline.
 
@@ -202,20 +202,33 @@ uv run python scripts/reembed_candidate_collections.py <one-sample-segments.json
   --manifest <reembedding-manifest.json>
 ```
 
-The quality-router artifact sequence is:
+The quality-router pre-training artifact sequence is now segment-set based. It does not
+enumerate Candidate/Gold pairs, check source-turn provenance, or score redundancy:
 
 ```powershell
-# Requires frozen reference facts, candidate Fact exports, MemoryPrint profiles,
-# and evidence-grounded directional relation decisions from the fixed Judge.
-uv run python scripts/build_fact_quality_labels.py `
+# 1. Normalize reviewed Gold Facts into frozen claim/time evaluation units.
+uv run python scripts/build_gold_evaluation_units.py `
+  --references <reviewed-reference-facts.jsonl> `
+  --output-dir <gold-unit-run-dir> `
+  --output <gold_evaluation_units.jsonl>
+
+# 2. Judge all anonymous model Fact sets together, one Segment per API call.
+uv run python scripts/judge_segment_fact_sets.py `
   --segments <segmented-root> `
-  --references <reference_facts.jsonl> `
+  --gold-units <gold_evaluation_units.jsonl> `
+  --gold-units-manifest <gold-unit-run-dir/manifest.json> `
+  --candidates <candidate_facts.jsonl> `
+  --candidate-inventory <candidate_inventory.json> `
+  --output-dir <segment-set-judge-run-dir> `
+  --output <segment_fact_set_judgments.jsonl>
+
+# 3. Deterministically compute correctness, claim/time recall, and F2 labels.
+uv run python scripts/build_fact_quality_labels.py `
+  --judge-decisions <segment_fact_set_judgments.jsonl> `
+  --judge-manifest <segment-set-judge-run-dir/manifest.json> `
+  --gold-units <gold_evaluation_units.jsonl> `
   --candidates <candidate_facts.jsonl> `
   --capabilities <model_capabilities.json> `
-  --judge-decisions <fact_relation_judgments.jsonl> `
-  --judge-manifest <fact-relation-judge-manifest.json> `
-  --allow-judge-matches-without-source-overlap `
-  --primary-label silver_gold_coverage `
   --output <fact_quality_labels.jsonl>
 
 uv run python scripts/train_quality_router.py `

@@ -1,9 +1,9 @@
 schema_version: "quality_router_v1"
 
 quality_router:
-  # Primary task-aligned target. silver_strict_fact_f1 remains in every label
-  # as an atomicity-sensitive diagnostic/ablation metric.
-  label_name: "silver_gold_coverage"
+  # Segment-set F2 combines strict Candidate correctness with strict Gold-claim
+  # recall. Exact Gold time is already enforced as a hard coverage gate.
+  label_name: "set_quality_f2"
   capability_dimensions:
     - "memory_recall"
     - "target_memory_precision"
