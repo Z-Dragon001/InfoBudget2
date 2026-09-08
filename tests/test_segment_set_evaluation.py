@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from infobudget.quality_router.segment_set_evaluation import (
     _take_stratified,
     _usage_totals,
+    _recover_gold_archives,
     parse_gold_evaluation_units,
     parse_segment_set_judgment,
 )
+from infobudget.rl_router.ledger import SqliteLedger
 
 
 def _reference_row() -> dict:
@@ -93,13 +96,29 @@ def test_gold_units_preserve_fact_and_freeze_exact_time() -> None:
                             "resolution": "day",
                             "surface_form": "May 20, 2023",
                         },
-                    }
+                    },
+                    {
+                        "claim_id": "g1:C2",
+                        "claim_text": "Alice started painting.",
+                        "required_time": {
+                            "required": True,
+                            "normalized_value": "currently",
+                            "resolution": "current",
+                            "surface_form": "currently",
+                        },
+                    },
                 ],
             }
         ],
     }
     parsed = parse_gold_evaluation_units(json.dumps(payload), _reference_row())
     assert parsed["gold_facts"][0]["claim_units"][0]["required_time"]["required"] is True
+    assert parsed["gold_facts"][0]["claim_units"][1]["required_time"] == {
+        "required": False,
+        "normalized_value": None,
+        "resolution": None,
+        "surface_form": None,
+    }
 
 
 def test_set_judge_accepts_missing_exact_time_as_explicit_failure() -> None:
@@ -193,3 +212,34 @@ def test_empty_raw_call_directory_has_zero_usage(tmp_path: Path) -> None:
         "input_tokens": 0,
         "output_tokens": 0,
     }
+
+
+def test_parser_repair_recovers_archived_gold_response_without_api(tmp_path: Path) -> None:
+    response = {
+        "segment_id": "seg-1",
+        "gold_facts": [{
+            "gold_fact_id": "g1",
+            "original_text": "Alice moved on May 20, 2023 and started painting.",
+            "claim_units": [{
+                "claim_id": "g1:C1", "claim_text": "Alice moved.",
+                "required_time": {
+                    "required": True, "normalized_value": "2023-05-20",
+                    "resolution": "date", "surface_form": "May 20, 2023",
+                },
+            }],
+        }],
+    }
+    raw = tmp_path / "raw_calls"
+    raw.mkdir()
+    (raw / "failed.json").write_text(json.dumps({
+        "status": "invalid_semantic_response", "segment_id": "seg-1",
+        "response_content": json.dumps(response),
+    }), encoding="utf-8")
+    ledger = SqliteLedger(tmp_path / "evaluation.sqlite3", "gold_units", key_fields=("segment_id",))
+    recovered = _recover_gold_archives(
+        output_dir=tmp_path, references=[_reference_row()], ledger=ledger,
+        identity={"prompt_sha256": "prompt-hash"},
+        model_spec=SimpleNamespace(effective_model_name="judge-model"),
+    )
+    assert recovered == 1
+    assert ledger.read_all()[0]["recovered_from_raw_call"] == "failed.json"

@@ -37,6 +37,18 @@ TIME_STATUSES = {
     "NOT_APPLICABLE",
 }
 TIME_RESOLUTIONS = {"day", "month", "year", "time", "duration", "frequency", None}
+TIME_RESOLUTION_ALIASES = {
+    "date": "day",
+    "calendar_day": "day",
+    "clock": "time",
+    "clock_time": "time",
+}
+NULL_LIKE_TIME_VALUES = {"", "null", "none", "n/a", "na", "not_applicable", "not applicable"}
+NON_EXACT_TIME_RESOLUTIONS = {"current", "present", "relative", "vague", "unspecified", "state"}
+NON_EXACT_TIME_SURFACES = {
+    "currently", "current", "now", "today", "yesterday", "recently", "lately",
+    "previously", "last day", "last week", "last month", "last year",
+}
 
 
 def plan_gold_evaluation_units(
@@ -82,6 +94,13 @@ def run_gold_evaluation_units(
     manifest_path = output_dir / "manifest.json"
     _require_resume_identity(manifest_path, identity)
     ledger = SqliteLedger(output_dir / "evaluation.sqlite3", "gold_units", key_fields=("segment_id",))
+    recovered_count = _recover_gold_archives(
+        output_dir=output_dir,
+        references=references,
+        ledger=ledger,
+        identity=identity,
+        model_spec=model_spec,
+    )
     completed = {str(row["segment_id"]): row for row in ledger.read_all()}
     write_jsonl(output_path, sorted(completed.values(), key=_segment_sort_key))
     atomic_write_json(
@@ -95,7 +114,7 @@ def run_gold_evaluation_units(
     )
     remaining = [row for row in references if str(row["segment_id"]) not in completed]
     if max_segments is not None:
-        remaining = _take_stratified(remaining, max_segments)
+        remaining = _take_stratified(remaining, max(0, max_segments - recovered_count))
 
     for number, reference_row in enumerate(remaining, start=1):
         request = _gold_request(reference_row)
@@ -116,19 +135,12 @@ def run_gold_evaluation_units(
         except ValueError as exc:
             _archive_call(output_dir, segment_id, prompt, "invalid_semantic_response", response.content, response, str(exc))
             raise ValueError(f"invalid Gold-unit response for {segment_id}: {exc}") from exc
-        row = {
-            **parsed,
-            "schema_version": GOLD_SCHEMA_VERSION,
-            "dataset_name": reference_row["dataset_name"],
-            "dataset": reference_row["dataset_name"],
-            "split": reference_row["split"],
-            "sample_id": reference_row["sample_id"],
-            "reference_set_hash": reference_row.get("reference_set_hash", ""),
-            "prompt_version": GOLD_PROMPT_VERSION,
-            "prompt_sha256": identity["prompt_sha256"],
-            "judge_model": model_spec.effective_model_name,
-            "judged_at": datetime.now(timezone.utc).isoformat(),
-        }
+        row = _gold_output_row(
+            parsed=parsed,
+            reference_row=reference_row,
+            identity=identity,
+            model_spec=model_spec,
+        )
         ledger.append(row)
         _archive_call(output_dir, segment_id, prompt, "committed", response.content, response, "")
         print(f"[gold {number}] {segment_id}: committed")
@@ -312,11 +324,27 @@ def parse_gold_evaluation_units(content: str, reference_row: dict[str, Any]) -> 
             time = unit.get("required_time")
             if not claim_text or not isinstance(time, dict) or not isinstance(time.get("required"), bool):
                 raise ValueError(f"{claim_id}: invalid claim text/time object")
+            required = time["required"]
+            resolution = _normalize_time_resolution(time.get("resolution"))
+            surface = str(time.get("surface_form") or "").strip().casefold()
+            if (
+                not required
+                or resolution in NON_EXACT_TIME_RESOLUTIONS
+                or surface in NON_EXACT_TIME_SURFACES
+            ):
+                time = {
+                    "required": False,
+                    "normalized_value": None,
+                    "resolution": None,
+                    "surface_form": None,
+                }
+            else:
+                time = {**time, "resolution": resolution}
             resolution = time.get("resolution")
             if resolution not in TIME_RESOLUTIONS:
-                raise ValueError(f"{claim_id}: invalid time resolution")
-            if not time["required"] and any(time.get(key) is not None for key in ("normalized_value", "resolution", "surface_form")):
-                raise ValueError(f"{claim_id}: non-required time fields must be null")
+                raise ValueError(f"{claim_id}: invalid time resolution {resolution!r}")
+            if time["required"] and resolution is None:
+                raise ValueError(f"{claim_id}: required exact time needs a resolution")
             if time["required"] and not str(time.get("surface_form") or "").strip():
                 raise ValueError(f"{claim_id}: required time needs surface_form")
             clean_units.append({"claim_id": claim_id, "claim_text": claim_text, "required_time": time})
@@ -464,6 +492,77 @@ def _validate_candidate_artifact(candidates_path: Path, inventory_path: Path) ->
         raise ValueError("candidate inventory has an unsupported schema_version")
     if inventory.get("candidate_facts_sha256") != file_sha256(candidates_path):
         raise ValueError("candidate inventory/corpus hash mismatch")
+
+
+def _normalize_time_resolution(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().casefold().replace("-", "_").replace(" ", "_")
+    if normalized in NULL_LIKE_TIME_VALUES:
+        return None
+    return TIME_RESOLUTION_ALIASES.get(normalized, normalized)
+
+
+def _gold_output_row(
+    *, parsed: dict[str, Any], reference_row: dict[str, Any],
+    identity: dict[str, Any], model_spec: ModelSpec,
+    recovered_from_raw_call: str = "",
+) -> dict[str, Any]:
+    return {
+        **parsed,
+        "schema_version": GOLD_SCHEMA_VERSION,
+        "dataset_name": reference_row["dataset_name"],
+        "dataset": reference_row["dataset_name"],
+        "split": reference_row["split"],
+        "sample_id": reference_row["sample_id"],
+        "reference_set_hash": reference_row.get("reference_set_hash", ""),
+        "prompt_version": GOLD_PROMPT_VERSION,
+        "prompt_sha256": identity["prompt_sha256"],
+        "judge_model": model_spec.effective_model_name,
+        "judged_at": datetime.now(timezone.utc).isoformat(),
+        "recovered_from_raw_call": recovered_from_raw_call,
+    }
+
+
+def _recover_gold_archives(
+    *, output_dir: Path, references: list[dict[str, Any]], ledger: SqliteLedger,
+    identity: dict[str, Any], model_spec: ModelSpec,
+) -> int:
+    """Commit newly valid archived responses after a parser-only repair."""
+    raw_dir = output_dir / "raw_calls"
+    if not raw_dir.is_dir():
+        return 0
+    by_segment = {str(row["segment_id"]): row for row in references}
+    completed = {str(row["segment_id"]) for row in ledger.read_all()}
+    recovered = 0
+    for path in sorted(raw_dir.glob("*.json"), reverse=True):
+        archive = json.loads(path.read_text(encoding="utf-8"))
+        segment_id = str(archive.get("segment_id") or "")
+        if (
+            segment_id in completed
+            or segment_id not in by_segment
+            or archive.get("status") != "invalid_semantic_response"
+            or not str(archive.get("response_content") or "").strip()
+        ):
+            continue
+        try:
+            parsed = parse_gold_evaluation_units(
+                str(archive["response_content"]), by_segment[segment_id]
+            )
+        except (ValueError, json.JSONDecodeError):
+            continue
+        row = _gold_output_row(
+            parsed=parsed,
+            reference_row=by_segment[segment_id],
+            identity=identity,
+            model_spec=model_spec,
+            recovered_from_raw_call=path.name,
+        )
+        if ledger.append(row):
+            completed.add(segment_id)
+            recovered += 1
+            print(f"[recover] {segment_id}: committed archived response without an API call")
+    return recovered
 
 
 def _load_segments(path: Path) -> dict[tuple[str, str, str, str], dict[str, Any]]:
