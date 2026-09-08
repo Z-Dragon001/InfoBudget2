@@ -52,6 +52,8 @@ def main() -> None:
     train_labels = _load_labels(args.train_labels)
     validation_labels = _load_labels(args.validation_labels)
     _validate_group_split(train_labels, validation_labels)
+    label_name = str(quality_config.values["label_name"])
+    _validate_primary_label(train_labels + validation_labels, label_name)
 
     train_segments = _segments_for_labels(train_labels, segments)
     validation_segments = _segments_for_labels(validation_labels, segments)
@@ -62,10 +64,10 @@ def main() -> None:
         feature_builder, validation_segments, validation_labels, profiles
     )
     train_targets = np.asarray(
-        [label.silver_strict_fact_f1 for label in train_labels], dtype=np.float32
+        [label.quality(label_name) for label in train_labels], dtype=np.float32
     )
     validation_targets = np.asarray(
-        [label.silver_strict_fact_f1 for label in validation_labels], dtype=np.float32
+        [label.quality(label_name) for label in validation_labels], dtype=np.float32
     )
 
     values = quality_config.values
@@ -103,7 +105,7 @@ def main() -> None:
         embedding_model=str(embedding_config["model_name"]),
         embedding_dimension=int(embedding_config["dimension"]),
         metadata={
-            "label_name": values["label_name"],
+            "label_name": label_name,
             "train_labels_sha256": file_sha256(args.train_labels),
             "validation_labels_sha256": file_sha256(args.validation_labels),
             "capabilities_sha256": file_sha256(args.capabilities),
@@ -118,7 +120,8 @@ def main() -> None:
             {
                 **label.to_dict(),
                 "predicted_quality": float(prediction),
-                "absolute_error": abs(float(prediction) - label.silver_strict_fact_f1),
+                "actual_quality": label.quality(label_name),
+                "absolute_error": abs(float(prediction) - label.quality(label_name)),
             }
             for label, prediction in zip(validation_labels, validation_predictions)
         ),
@@ -127,6 +130,7 @@ def main() -> None:
         output_dir / "training_metrics.json",
         {
             "schema_version": "quality_training_metrics_v1",
+            "label_name": label_name,
             "embedding_model": embedding_config["model_name"],
             "embedding_dimension": embedding_config["dimension"],
             "input_dimension": feature_builder.input_dimension,
@@ -193,6 +197,23 @@ def _validate_group_split(train: list[FactQualityLabel], validation: list[FactQu
     overlap = sorted(train_groups & validation_groups)
     if overlap:
         raise ValueError(f"sample-level train/validation leakage: {overlap[:10]}")
+
+
+def _validate_primary_label(
+    labels: list[FactQualityLabel], expected_label_name: str
+) -> None:
+    mismatched = sorted(
+        {
+            label.primary_label_name
+            for label in labels
+            if label.primary_label_name != expected_label_name
+        }
+    )
+    if mismatched:
+        raise ValueError(
+            "label artifacts were built for a different primary target; "
+            f"expected={expected_label_name}, found={mismatched}"
+        )
 
 
 def _segments_for_labels(labels: list[FactQualityLabel], segments: dict) -> list[TopicSegment]:

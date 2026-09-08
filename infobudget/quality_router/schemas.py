@@ -16,6 +16,11 @@ CAPABILITY_DIMENSIONS: tuple[str, ...] = (
     "evidence_f1",
 )
 
+QUALITY_LABEL_NAMES: tuple[str, ...] = (
+    "silver_strict_fact_f1",
+    "silver_gold_coverage",
+)
+
 
 def _non_empty(value: Any, field: str) -> str:
     text = str(value or "").strip()
@@ -108,9 +113,14 @@ class FactQualityLabel:
     precision: float
     recall: float
     silver_strict_fact_f1: float
+    covered_gold_count: int
+    uncovered_gold_count: int
+    covering_candidate_count: int
+    silver_gold_coverage: float
+    primary_label_name: str
     reference_set_hash: str
     candidate_extraction_run_id: str
-    label_version: str = "silver_f1_v1"
+    label_version: str = "silver_dual_quality_v2"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -121,21 +131,51 @@ class FactQualityLabel:
         value["fn"] = value.pop("false_negative")
         return value
 
+    def quality(self, label_name: str) -> float:
+        if label_name not in QUALITY_LABEL_NAMES:
+            raise ValueError(
+                f"unsupported quality label {label_name!r}; expected one of {QUALITY_LABEL_NAMES}"
+            )
+        return float(getattr(self, label_name))
+
+    @property
+    def primary_quality(self) -> float:
+        return self.quality(self.primary_label_name)
+
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "FactQualityLabel":
         quality = float(value["silver_strict_fact_f1"])
         if not 0.0 <= quality <= 1.0:
             raise ValueError("silver_strict_fact_f1 must be in [0, 1]")
+        gold_coverage = float(value.get("silver_gold_coverage", value.get("recall", 0.0)))
+        if not 0.0 <= gold_coverage <= 1.0:
+            raise ValueError("silver_gold_coverage must be in [0, 1]")
+        primary_label_name = str(
+            value.get("primary_label_name") or "silver_strict_fact_f1"
+        )
+        if primary_label_name not in QUALITY_LABEL_NAMES:
+            raise ValueError(
+                f"primary_label_name must be one of {QUALITY_LABEL_NAMES}"
+            )
+        true_positive = int(value.get("tp", value.get("true_positive", 0)))
+        false_negative = int(value.get("fn", value.get("false_negative", 0)))
         return cls(
             key=FactSetKey.from_dict(value),
             model_id=_non_empty(value.get("model_id") or value.get("extractor_model"), "model_id"),
             profile_id=_non_empty(value.get("profile_id"), "profile_id"),
-            true_positive=int(value.get("tp", value.get("true_positive", 0))),
+            true_positive=true_positive,
             false_positive=int(value.get("fp", value.get("false_positive", 0))),
-            false_negative=int(value.get("fn", value.get("false_negative", 0))),
+            false_negative=false_negative,
             precision=float(value.get("precision", 0.0)),
             recall=float(value.get("recall", 0.0)),
             silver_strict_fact_f1=quality,
+            covered_gold_count=int(value.get("covered_gold_count", true_positive)),
+            uncovered_gold_count=int(value.get("uncovered_gold_count", false_negative)),
+            covering_candidate_count=int(
+                value.get("covering_candidate_count", true_positive)
+            ),
+            silver_gold_coverage=gold_coverage,
+            primary_label_name=primary_label_name,
             reference_set_hash=_non_empty(value.get("reference_set_hash"), "reference_set_hash"),
             candidate_extraction_run_id=_non_empty(
                 value.get("candidate_extraction_run_id"), "candidate_extraction_run_id"

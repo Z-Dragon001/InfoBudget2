@@ -49,6 +49,8 @@ def audit_fact_pair_coverage(
     pair_counts_by_reference_model: Counter[tuple[str, ReferenceKey]] = Counter()
     pair_counts_by_model: Counter[str] = Counter()
     seen_pair_ids: set[str] = set()
+    included_pair_keys: set[tuple[CandidateKey, ReferenceKey]] = set()
+    included_without_source_overlap = 0
 
     for row in iter_jsonl(pairs_path):
         pair_id = str(row.get("pair_id") or "").strip()
@@ -66,7 +68,11 @@ def audit_fact_pair_coverage(
         candidate_sources = candidates[candidate_key]["source_turn_ids"]
         reference_sources = references[reference_key]["source_turn_ids"]
         if not set(candidate_sources) & set(reference_sources):
-            raise ValueError(f"eligible pair has no source overlap: {pair_id}")
+            included_without_source_overlap += 1
+        logical_pair_key = (candidate_key, reference_key)
+        if logical_pair_key in included_pair_keys:
+            raise ValueError(f"duplicate logical candidate/Gold pair: {logical_pair_key}")
+        included_pair_keys.add(logical_pair_key)
         covered_candidates.add(candidate_key)
         covered_references_by_model[model_id].add(reference_key)
         pair_counts_by_candidate[candidate_key] += 1
@@ -96,13 +102,19 @@ def audit_fact_pair_coverage(
     risky_rows: list[dict[str, Any]] = []
     risk_reasons: Counter[str] = Counter()
     risky_by_model: Counter[str] = Counter()
+    excluded_without_source_overlap = 0
+    excluded_with_source_overlap = 0
     for (segment, model_id), candidate_keys in candidates_by_segment_model.items():
         for candidate_key in candidate_keys:
             candidate = candidates[candidate_key]
             for reference_key in references_by_segment.get(segment, ()):
                 reference = references[reference_key]
-                if set(candidate["source_turn_ids"]) & set(reference["source_turn_ids"]):
+                if (candidate_key, reference_key) in included_pair_keys:
                     continue
+                if set(candidate["source_turn_ids"]) & set(reference["source_turn_ids"]):
+                    excluded_with_source_overlap += 1
+                    continue
+                excluded_without_source_overlap += 1
                 distance = _minimum_source_distance(
                     candidate["source_turn_ids"], reference["source_turn_ids"]
                 )
@@ -175,8 +187,17 @@ def audit_fact_pair_coverage(
         "model_count": len(models),
         "models": models,
         "raw_same_segment_pair_count": raw_pair_count,
-        "eligible_source_overlap_pair_count": eligible_pair_count,
-        "excluded_no_source_overlap_pair_count": excluded_pair_count,
+        "included_pair_count": eligible_pair_count,
+        "included_pair_with_source_overlap_count": (
+            eligible_pair_count - included_without_source_overlap
+        ),
+        "included_pair_without_source_overlap_count": included_without_source_overlap,
+        "eligible_source_overlap_pair_count": (
+            eligible_pair_count - included_without_source_overlap
+        ),
+        "excluded_pair_count": excluded_pair_count,
+        "excluded_no_source_overlap_pair_count": excluded_without_source_overlap,
+        "excluded_with_source_overlap_pair_count": excluded_with_source_overlap,
         "unique_candidate_with_pair_count": len(covered_candidates),
         "unique_candidate_without_pair_count": len(candidates) - len(covered_candidates),
         "candidate_coverage": _coverage(len(candidates), len(covered_candidates)),
@@ -349,4 +370,3 @@ def _token_jaccard(left: str, right: str) -> float:
     right_tokens = set(_normalized_text(right).split())
     union = left_tokens | right_tokens
     return len(left_tokens & right_tokens) / len(union) if union else 1.0
-

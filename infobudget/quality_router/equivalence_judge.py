@@ -1,4 +1,4 @@
-"""Resumable, evidence-grounded batch judging for candidate/Gold Fact pairs."""
+"""Resumable grounding and bidirectional-relation judging for Fact pairs."""
 
 from __future__ import annotations
 
@@ -18,19 +18,15 @@ from infobudget.schemas import ModelSpec, PriceSpec
 from infobudget.utils.text import count_tokens
 
 
-PROMPT_VERSION = "fact_equivalence_judge_v1"
-SCHEMA_VERSION = "fact_equivalence_judgment_v1"
-ALLOWED_REASON_CODES = {
+PROMPT_VERSION = "fact_relation_judge_v2"
+SCHEMA_VERSION = "fact_relation_judgment_v2"
+ALLOWED_RELATIONS = {
     "EQUIVALENT",
-    "CANDIDATE_UNSUPPORTED",
-    "REFERENCE_UNSUPPORTED",
-    "DIFFERENT_SUBJECT",
-    "DIFFERENT_CLAIM",
-    "TIME_STATE_MISMATCH",
-    "MODALITY_ATTRIBUTION_MISMATCH",
-    "POLARITY_MISMATCH",
-    "GRANULARITY_MISMATCH",
-    "AMBIGUOUS",
+    "CANDIDATE_CONTAINS_REFERENCE",
+    "REFERENCE_CONTAINS_CANDIDATE",
+    "PARTIAL_OVERLAP",
+    "DIFFERENT",
+    "UNSUPPORTED",
 }
 _TURN_START = re.compile(r"^\[[^\]]+\]\s+\d+\.[^:]+:")
 _PAIR_REQUIRED = {
@@ -80,7 +76,7 @@ def plan_equivalence_judging(
             f"({model_spec.max_input_tokens})"
         )
     return {
-        "schema_version": "fact_equivalence_judge_plan_v1",
+        "schema_version": "fact_relation_judge_plan_v2",
         "paid_api_called": False,
         "pair_count": len(pairs),
         "batch_count": len(batches),
@@ -282,7 +278,7 @@ def run_equivalence_judging(
 def parse_equivalence_decisions(
     content: str, batch: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Strictly validate one model response against the requested pair IDs."""
+    """Validate v2 relation decisions; the legacy function name is retained for API compatibility."""
     try:
         payload = json.loads(content)
     except json.JSONDecodeError as exc:
@@ -299,39 +295,74 @@ def parse_equivalence_decisions(
         if not pair_id or pair_id in seen:
             raise ValueError(f"missing or duplicate pair_id at decisions[{index}]")
         seen.add(pair_id)
-        flags = {}
+        flags: dict[str, bool] = {}
         for field in (
-            "equivalent",
-            "candidate_entailed",
-            "reference_entailed",
-            "same_claim",
+            "candidate_fully_grounded",
+            "reference_fully_grounded",
+            "candidate_entails_reference",
+            "reference_entails_candidate",
         ):
             if type(raw.get(field)) is not bool:
                 raise ValueError(f"{pair_id}: {field} must be a JSON boolean")
             flags[field] = raw[field]
-        reason = str(raw.get("reason_code") or "").strip().upper()
-        if reason not in ALLOWED_REASON_CODES:
-            raise ValueError(f"{pair_id}: unsupported reason_code {reason!r}")
-        logically_equivalent = (
-            flags["candidate_entailed"]
-            and flags["reference_entailed"]
-            and flags["same_claim"]
+        relation = str(raw.get("relation") or "").strip().upper()
+        if relation not in ALLOWED_RELATIONS:
+            raise ValueError(f"{pair_id}: unsupported relation {relation!r}")
+        _validate_relation(pair_id, flags, relation)
+        strict_equivalent = relation == "EQUIVALENT"
+        candidate_covers_reference = relation in {
+            "EQUIVALENT",
+            "CANDIDATE_CONTAINS_REFERENCE",
+        }
+        result.append(
+            {
+                "pair_id": pair_id,
+                **flags,
+                "relation": relation,
+                "strict_equivalent": strict_equivalent,
+                "candidate_covers_reference": candidate_covers_reference,
+                # Compatibility alias for existing strict-equivalence readers.
+                "equivalent": strict_equivalent,
+            }
         )
-        if flags["equivalent"] != logically_equivalent:
-            raise ValueError(
-                f"{pair_id}: equivalent/entailment/same_claim/reason_code are inconsistent"
-            )
-        if (reason == "EQUIVALENT") != flags["equivalent"]:
-            raise ValueError(
-                f"{pair_id}: EQUIVALENT reason_code must agree with equivalent"
-            )
-        result.append({"pair_id": pair_id, **flags, "reason_code": reason})
     if set(expected_ids) != seen or len(result) != len(expected_ids):
         missing = sorted(set(expected_ids) - seen)
         extra = sorted(seen - set(expected_ids))
         raise ValueError(f"decision ID mismatch; missing={missing[:5]}, extra={extra[:5]}")
     by_id = {row["pair_id"]: row for row in result}
     return [by_id[pair_id] for pair_id in expected_ids]
+
+
+def _validate_relation(
+    pair_id: str, flags: dict[str, bool], relation: str
+) -> None:
+    grounded = (
+        flags["candidate_fully_grounded"]
+        and flags["reference_fully_grounded"]
+    )
+    candidate_entails = flags["candidate_entails_reference"]
+    reference_entails = flags["reference_entails_candidate"]
+    if not grounded:
+        if relation != "UNSUPPORTED" or candidate_entails or reference_entails:
+            raise ValueError(
+                f"{pair_id}: an ungrounded Fact requires UNSUPPORTED and false entailment flags"
+            )
+        return
+    if relation == "UNSUPPORTED":
+        raise ValueError(f"{pair_id}: fully grounded Facts cannot be UNSUPPORTED")
+    expected = {
+        (True, True): "EQUIVALENT",
+        (True, False): "CANDIDATE_CONTAINS_REFERENCE",
+        (False, True): "REFERENCE_CONTAINS_CANDIDATE",
+    }.get((candidate_entails, reference_entails))
+    if expected is not None and relation != expected:
+        raise ValueError(
+            f"{pair_id}: entailment directions require relation={expected}, got {relation}"
+        )
+    if expected is None and relation not in {"PARTIAL_OVERLAP", "DIFFERENT"}:
+        raise ValueError(
+            f"{pair_id}: false entailment directions require PARTIAL_OVERLAP or DIFFERENT"
+        )
 
 
 def _load_pairs(path: Path) -> list[dict[str, Any]]:
@@ -484,7 +515,7 @@ def _archive_call(
     atomic_write_json(
         path,
         {
-            "schema_version": "fact_equivalence_judge_raw_call_v1",
+            "schema_version": "fact_relation_judge_raw_call_v2",
             "status": status,
             "batch_id": batch_id,
             "pair_ids": [row["pair_id"] for row in batch],
@@ -560,14 +591,31 @@ def _make_manifest(
     successful = [row for row in raw_calls if row.get("status") in {"response_received", "invalid_semantic_response"} and isinstance(row.get("usage"), dict)]
     input_tokens = sum(int(row["usage"].get("input_tokens") or 0) for row in successful)
     output_tokens = sum(int(row["usage"].get("output_tokens") or 0) for row in successful)
-    reason_counts: Counter[str] = Counter()
+    relation_counts: Counter[str] = Counter()
+    strict_equivalent_count = 0
+    candidate_covers_reference_count = 0
     ledger_path = output_dir / "judgments.sqlite3"
     if ledger_path.is_file():
         rows = SqliteLedger(ledger_path, "judgments", key_fields=("pair_id",)).read_all()
-        reason_counts.update(str(row.get("reason_code") or "") for row in rows)
+        relation_counts.update(str(row.get("relation") or "") for row in rows)
+        strict_equivalent_count = sum(
+            int(bool(row.get("strict_equivalent", row.get("equivalent", False))))
+            for row in rows
+        )
+        candidate_covers_reference_count = sum(
+            int(
+                bool(
+                    row.get(
+                        "candidate_covers_reference",
+                        row.get("strict_equivalent", row.get("equivalent", False)),
+                    )
+                )
+            )
+            for row in rows
+        )
     complete = completed_count == pair_count
     return {
-        "schema_version": "fact_equivalence_judge_manifest_v1",
+        "schema_version": "fact_relation_judge_manifest_v2",
         **identity,
         "status": "complete" if complete else "incomplete",
         "run_complete": complete,
@@ -586,7 +634,9 @@ def _make_manifest(
         ) / 1_000_000,
         "currency": price.currency,
         "price_effective_date": price.price_effective_date,
-        "reason_counts": dict(sorted(reason_counts.items())),
+        "relation_counts": dict(sorted(relation_counts.items())),
+        "strict_equivalent_count": strict_equivalent_count,
+        "candidate_covers_reference_count": candidate_covers_reference_count,
         "output": str(output_path.resolve()) if output_path else None,
         "output_sha256": file_sha256(output_path) if output_path else None,
         "updated_at": _utc_now(),

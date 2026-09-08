@@ -65,8 +65,8 @@ def test_audit_reports_unique_coverage_and_risky_exclusions(tmp_path: Path) -> N
     assert result["reference_fact_count"] == 2
     assert result["raw_same_segment_pair_count"] == 4
     assert result["eligible_source_overlap_pair_count"] == 1
+    assert result["included_pair_without_source_overlap_count"] == 0
     assert result["unique_candidate_without_pair_count"] == 1
     assert result["reference_coverage_by_model"]["m1"]["without_eligible_pair"] == 1
     risky_rows = [json.loads(line) for line in risky.read_text(encoding="utf-8").splitlines()]
     assert any(row["candidate_fact_id"] == "c2" and row["reference_fact_id"] == "r2" for row in risky_rows)
-

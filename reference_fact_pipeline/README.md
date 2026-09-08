@@ -110,7 +110,7 @@ Gold Fact: |####--------------------| 180/1054 segments elapsed=... eta=... item
   --output <quality-labels.jsonl>
 ```
 
-路由训练的主监督量仍是单一 `silver_strict_fact_f1`；precision、recall 和本目录输出的其他指标用于数据审计、消融和错误分析，不作为额外优化目标，从而避免增加路由训练复杂度。
+路由训练仍采用单一标量目标，但主目标改为 `silver_gold_coverage`：只要 Candidate 完全有据且能够蕴含 Gold Fact，即可覆盖该 Gold。每条标签同时保留要求双向等价的 `silver_strict_fact_f1`，用于原子性诊断、消融和错误分析，不作为默认训练目标。
 
 ## 数据集特定规则
 

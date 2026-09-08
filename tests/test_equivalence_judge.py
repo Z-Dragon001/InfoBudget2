@@ -82,26 +82,28 @@ def test_plan_is_read_only_and_groups_pairs(tmp_path: Path) -> None:
     assert result["batch_count"] == 2
 
 
-def test_parse_decisions_requires_exact_and_consistent_ids() -> None:
+def test_parse_decisions_supports_asymmetric_candidate_coverage() -> None:
     batch = [_pair()]
     content = json.dumps(
         {
             "decisions": [
                 {
                     "pair_id": "p1",
-                    "equivalent": True,
-                    "candidate_entailed": True,
-                    "reference_entailed": True,
-                    "same_claim": True,
-                    "reason_code": "EQUIVALENT",
+                    "candidate_fully_grounded": True,
+                    "reference_fully_grounded": True,
+                    "candidate_entails_reference": True,
+                    "reference_entails_candidate": False,
+                    "relation": "CANDIDATE_CONTAINS_REFERENCE",
                 }
             ]
         }
     )
-    assert parse_equivalence_decisions(content, batch)[0]["equivalent"] is True
+    decision = parse_equivalence_decisions(content, batch)[0]
+    assert decision["strict_equivalent"] is False
+    assert decision["candidate_covers_reference"] is True
     broken = json.loads(content)
-    broken["decisions"][0]["same_claim"] = False
-    with pytest.raises(ValueError, match="inconsistent"):
+    broken["decisions"][0]["relation"] = "EQUIVALENT"
+    with pytest.raises(ValueError, match="require relation"):
         parse_equivalence_decisions(json.dumps(broken), batch)
 
 
@@ -138,11 +140,11 @@ def test_run_exports_complete_judgments_and_resumes(tmp_path: Path) -> None:
                         "decisions": [
                             {
                                 "pair_id": "p1",
-                                "equivalent": True,
-                                "candidate_entailed": True,
-                                "reference_entailed": True,
-                                "same_claim": True,
-                                "reason_code": "EQUIVALENT",
+                                "candidate_fully_grounded": True,
+                                "reference_fully_grounded": True,
+                                "candidate_entails_reference": True,
+                                "reference_entails_candidate": True,
+                                "relation": "EQUIVALENT",
                             }
                         ]
                     }

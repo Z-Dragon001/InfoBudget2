@@ -1,4 +1,4 @@
-"""Evaluate quality-gap decisions against held-out Strict Fact-F1 labels."""
+"""Evaluate quality-gap decisions against each artifact's frozen primary label."""
 
 from __future__ import annotations
 

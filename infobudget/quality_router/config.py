@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from infobudget.quality_router.schemas import CAPABILITY_DIMENSIONS
+from infobudget.quality_router.schemas import CAPABILITY_DIMENSIONS, QUALITY_LABEL_NAMES
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,8 +28,10 @@ class QualityRouterConfig:
             raise ValueError("quality router config is missing quality_router/artifacts")
         if tuple(values.get("capability_dimensions", ())) != CAPABILITY_DIMENSIONS:
             raise ValueError("configured capability dimensions do not match MemoryPrint v1")
-        if values.get("label_name") != "silver_strict_fact_f1":
-            raise ValueError("quality router label_name must be silver_strict_fact_f1")
+        if values.get("label_name") not in QUALITY_LABEL_NAMES:
+            raise ValueError(
+                f"quality router label_name must be one of {QUALITY_LABEL_NAMES}"
+            )
         if any(int(item) <= 0 for item in values.get("hidden_dimensions", ())):
             raise ValueError("hidden_dimensions must be positive")
         for name in ("learning_rate", "batch_size", "epochs", "early_stopping_patience", "huber_delta", "budget_cost_quantum"):

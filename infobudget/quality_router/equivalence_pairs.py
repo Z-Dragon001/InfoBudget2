@@ -20,8 +20,9 @@ def build_fact_equivalence_pairs(
     candidates_path: str | Path,
     output_path: str | Path,
     manifest_path: str | Path,
+    require_source_overlap: bool = True,
 ) -> dict[str, Any]:
-    """Write every source-overlapping pair in the same segment/model group."""
+    """Write the requested same-segment pair universe for semantic judging."""
     segments = _load_segments(Path(segments_path))
     references, reference_hashes = _load_references(Path(references_path))
     candidates = _load_candidates(Path(candidates_path))
@@ -46,6 +47,8 @@ def build_fact_equivalence_pairs(
     excluded_no_source_overlap = 0
     eligible_by_model: Counter[str] = Counter()
     excluded_by_model: Counter[str] = Counter()
+    no_source_overlap_count = 0
+    no_source_overlap_by_model: Counter[str] = Counter()
 
     for candidate_key in sorted(candidates):
         segment_key = candidate_key[:4]
@@ -58,13 +61,20 @@ def build_fact_equivalence_pairs(
                     set(candidate.source_turn_ids) & set(reference.source_turn_ids)
                 )
                 if not shared_sources:
+                    no_source_overlap_count += 1
+                    no_source_overlap_by_model[model_id] += 1
+                if require_source_overlap and not shared_sources:
                     excluded_no_source_overlap += 1
                     excluded_by_model[model_id] += 1
                     continue
                 pair_id = _pair_id(segment_key, model_id, candidate, reference)
                 rows.append(
                     {
-                        "schema_version": "fact_equivalence_pair_v1",
+                        "schema_version": (
+                            "fact_equivalence_pair_v1"
+                            if require_source_overlap
+                            else "fact_equivalence_pair_v2"
+                        ),
                         "pair_id": pair_id,
                         "dataset": segment_key[0],
                         "dataset_name": segment_key[0],
@@ -96,7 +106,11 @@ def build_fact_equivalence_pairs(
     )
     output = write_jsonl(output_path, rows)
     manifest = {
-        "schema_version": "fact_equivalence_pair_manifest_v1",
+        "schema_version": (
+            "fact_equivalence_pair_manifest_v1"
+            if require_source_overlap
+            else "fact_equivalence_pair_manifest_v2"
+        ),
         "segments_sha256": _path_digest(Path(segments_path)),
         "references_sha256": file_sha256(references_path),
         "candidates_sha256": file_sha256(candidates_path),
@@ -109,11 +123,19 @@ def build_fact_equivalence_pairs(
         "raw_same_segment_pair_count": raw_pair_count,
         "eligible_pair_count": len(rows),
         "excluded_no_source_overlap_count": excluded_no_source_overlap,
+        "no_source_overlap_pair_count": no_source_overlap_count,
+        "included_no_source_overlap_count": (
+            0 if require_source_overlap else no_source_overlap_count
+        ),
         "eligible_pairs_by_model": dict(sorted(eligible_by_model.items())),
         "excluded_pairs_by_model": dict(sorted(excluded_by_model.items())),
+        "no_source_overlap_pairs_by_model": dict(
+            sorted(no_source_overlap_by_model.items())
+        ),
         "pair_policy": {
             "same_dataset_split_sample_segment_required": True,
-            "source_turn_overlap_required": True,
+            "source_turn_overlap_required": require_source_overlap,
+            "each_fact_independently_grounded_by_judge": not require_source_overlap,
             "semantic_decision_included": False,
         },
     }

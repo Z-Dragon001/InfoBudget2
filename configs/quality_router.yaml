@@ -1,7 +1,9 @@
 schema_version: "quality_router_v1"
 
 quality_router:
-  label_name: "silver_strict_fact_f1"
+  # Primary task-aligned target. silver_strict_fact_f1 remains in every label
+  # as an atomicity-sensitive diagnostic/ablation metric.
+  label_name: "silver_gold_coverage"
   capability_dimensions:
     - "memory_recall"
     - "target_memory_precision"

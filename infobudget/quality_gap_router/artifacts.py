@@ -106,7 +106,7 @@ def join_observations(
                     predicted_quality=value["predicted_quality"],
                     cost=costs[identity],
                 ),
-                actual_quality=label.silver_strict_fact_f1,
+                actual_quality=label.primary_quality,
             )
         )
     return group_observations(observations)

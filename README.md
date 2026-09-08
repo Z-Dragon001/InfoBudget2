@@ -175,7 +175,8 @@ The primary method is now a supervised scalar scorer rather than a fixed three-c
 actor-critic. It concatenates a 384-dimensional
 `sentence-transformers/all-MiniLM-L6-v2` segment embedding, six leakage-safe structural
 features, and the frozen seven-dimensional MemoryPrint. The resulting 397-dimensional
-input predicts one `silver_strict_fact_f1` value for each `(segment, model)` pair. A
+input predicts one `silver_gold_coverage` value for each `(segment, model)` pair. Every
+label row also preserves `silver_strict_fact_f1` as an atomicity-sensitive diagnostic. A
 deterministic multiple-choice budget optimizer then selects exactly one model per segment.
 The previous RL implementation remains available as an experimental baseline.
 
@@ -205,13 +206,16 @@ The quality-router artifact sequence is:
 
 ```powershell
 # Requires frozen reference facts, candidate Fact exports, MemoryPrint profiles,
-# and pairwise equivalent/non-equivalent decisions from the fixed Judge.
+# and evidence-grounded directional relation decisions from the fixed Judge.
 uv run python scripts/build_fact_quality_labels.py `
   --segments <segmented-root> `
   --references <reference_facts.jsonl> `
   --candidates <candidate_facts.jsonl> `
   --capabilities <model_capabilities.json> `
-  --judge-decisions <fact_equivalence_judgments.jsonl> `
+  --judge-decisions <fact_relation_judgments.jsonl> `
+  --judge-manifest <fact-relation-judge-manifest.json> `
+  --allow-judge-matches-without-source-overlap `
+  --primary-label silver_gold_coverage `
   --output <fact_quality_labels.jsonl>
 
 uv run python scripts/train_quality_router.py `
@@ -243,8 +247,8 @@ the local-quality and QA-delta scales are never directly subtracted.
 
 The independent `infobudget.quality_gap_router` package reuses the trained scalar quality
 scorer but replaces the multiple-choice budget optimizer with an epsilon-noninferiority
-decision. For each segment it selects the cheapest candidate whose predicted Strict
-Fact-F1 is within the validation-selected `epsilon` of the predicted best candidate.
+decision. For each segment it selects the cheapest candidate whose predicted frozen
+primary quality label is within the validation-selected `epsilon` of the predicted best candidate.
 QA/Reader/Judge signals are not used by this decision path.
 
 Calibrate `epsilon` and the optional conservative pairwise-gap residual bound on validation

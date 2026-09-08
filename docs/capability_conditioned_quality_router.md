@@ -12,7 +12,10 @@ For segment `d` and candidate model `m`, the scorer receives:
 - a seven-dimensional frozen MemoryPrint for model `m`.
 
 The concatenated 397-dimensional feature predicts one scalar
-`silver_strict_fact_f1`. It does not predict seven quality heads, use model identity as an
+`silver_gold_coverage`. A fully grounded compound Candidate can cover a narrower Gold Fact
+when the Candidate entails it. The same artifact retains `silver_strict_fact_f1`, which
+requires bidirectional equivalence and is used for diagnostics and ablations. The scorer
+does not predict seven quality heads, use model identity as an
 action class, consume QA correctness during training, or optimize an RL reward.
 
 Because the observed theme segments are frequently longer than MiniLM's 256-wordpiece
@@ -31,8 +34,8 @@ without retraining it.
 1. `model_capabilities.json`: validated by `configs/model_capabilities.schema.json`.
 2. `reference_facts.jsonl`: one frozen silver reference Fact set per segment.
 3. candidate Fact JSONL or a Qdrant human-inspection export.
-4. `fact_equivalence_judgments.jsonl`: fixed-Judge binary decisions for candidate/reference
-   Fact pairs.
+4. `fact_relation_judgments.jsonl`: fixed-Judge grounding, bidirectional entailment, and
+   relation decisions for candidate/reference Fact pairs.
 5. `fact_quality_labels.jsonl`: scalar labels built by
    `scripts/build_fact_quality_labels.py`.
 6. separate train and validation label files whose sample IDs do not overlap.
