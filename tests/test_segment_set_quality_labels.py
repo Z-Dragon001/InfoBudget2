@@ -31,7 +31,7 @@ def test_score_result_gives_partial_credit_but_applies_time_hard_gate() -> None:
     }
     label, _ = _score_result(
         judgment=judgment, result=result,
-        gold_time={"g1": True, "g2": False}, profile_id="profile-a",
+        gold_fact_ids={"g1", "g2"}, profile_id="profile-a",
         candidate_extraction_run_id="run-a", reference_set_hash="hash-a",
     )
     assert label["strict_candidate_precision"] == 0.5
@@ -39,4 +39,6 @@ def test_score_result_gives_partial_credit_but_applies_time_hard_gate() -> None:
     assert label["strict_gold_fact_recall"] == 0.0
     assert label["partial_credit_gold_coverage"] == 0.25
     assert label["temporal_recall"] == 0.0
+    assert label["temporal_gold_fact_count"] == 1
+    assert label["time_applicability_decided_by"] == "judge"
     assert label["set_quality_f2"] == pytest.approx(0.2884615385)

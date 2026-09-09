@@ -10,7 +10,6 @@ from typing import Any
 from infobudget.quality_router.io import (
     file_sha256, iter_jsonl, load_capability_profiles, write_jsonl,
 )
-from infobudget.quality_router.segment_set_evaluation import gold_requires_exact_time
 
 
 def main() -> None:
@@ -42,10 +41,8 @@ def main() -> None:
         reference_row = references.get(segment_id)
         if reference_row is None:
             raise ValueError(f"Judge references unknown Gold segment: {segment_id}")
-        gold_time = {
-            str(fact["reference_fact_id"]): gold_requires_exact_time(
-                str(fact.get("text") or fact.get("fact_text"))
-            )
+        gold_fact_ids = {
+            str(fact["reference_fact_id"])
             for fact in reference_row["reference_facts"]
         }
         for result in judgment["candidate_set_results"]:
@@ -57,7 +54,8 @@ def main() -> None:
             if model_id not in profiles:
                 raise ValueError(f"capability profile is missing model: {model_id}")
             label, detail = _score_result(
-                judgment=judgment, result=result, gold_time=gold_time,
+                judgment=judgment, result=result,
+                gold_fact_ids=gold_fact_ids,
                 profile_id=profiles[model_id].profile_id,
                 candidate_extraction_run_id=run_ids.get(key, "unknown"),
                 reference_set_hash=str(
@@ -72,7 +70,7 @@ def main() -> None:
     if args.details_output:
         write_jsonl(args.details_output, details)
     print(json.dumps({
-        "schema_version": "segment_set_quality_label_build_v2",
+        "schema_version": "segment_set_quality_label_build_v3",
         "label_count": len(rows),
         "segment_count": len({row["segment_id"] for row in rows}),
         "model_count": len({row["model_id"] for row in rows}),
@@ -85,7 +83,7 @@ def main() -> None:
 
 def _score_result(
     *, judgment: dict[str, Any], result: dict[str, Any],
-    gold_time: dict[str, bool], profile_id: str,
+    gold_fact_ids: set[str], profile_id: str,
     candidate_extraction_run_id: str, reference_set_hash: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     candidate_values = {
@@ -110,18 +108,21 @@ def _score_result(
         str(item["gold_fact_id"]): item
         for item in result["gold_fact_assessments"]
     }
-    if set(assessments) != set(gold_time):
+    if set(assessments) != gold_fact_ids:
         raise ValueError(
             f"{judgment['segment_id']}/{result['model_id']}: Gold Fact mismatch"
         )
     strict_full: set[str] = set()
     weighted_sum = 0.0
-    temporal_pass = 0
-    temporal_total = sum(gold_time.values())
+    temporal_pass = sum(
+        item["time_status"] == "PASS" for item in assessments.values()
+    )
+    temporal_total = sum(
+        item["time_status"] != "NOT_APPLICABLE"
+        for item in assessments.values()
+    )
     for gold_id, item in assessments.items():
         time_ok = item["time_status"] in {"PASS", "NOT_APPLICABLE"}
-        if gold_time[gold_id] and item["time_status"] == "PASS":
-            temporal_pass += 1
         if not time_ok:
             continue
         if item["coverage_status"] == "FULL":
@@ -129,7 +130,7 @@ def _score_result(
             weighted_sum += 1.0
         elif item["coverage_status"] == "PARTIAL":
             weighted_sum += 0.5
-    gold_total = len(gold_time)
+    gold_total = len(gold_fact_ids)
     strict_recall = len(strict_full) / gold_total if gold_total else 1.0
     weighted_recall = weighted_sum / gold_total if gold_total else 1.0
     strict_f1 = _fbeta(strict_precision, strict_recall, beta=1.0)
@@ -141,7 +142,7 @@ def _score_result(
         "segment_id": judgment["segment_id"], "model_id": result["model_id"],
     }
     label = {
-        "schema_version": "segment_set_quality_label_v2", **identity,
+        "schema_version": "segment_set_quality_label_v3", **identity,
         "profile_id": profile_id,
         "tp": supported, "fp": candidate_total - supported,
         "fn": gold_total - len(strict_full),
@@ -163,7 +164,8 @@ def _score_result(
         "primary_label_name": "set_quality_f2",
         "reference_set_hash": reference_set_hash,
         "candidate_extraction_run_id": candidate_extraction_run_id,
-        "label_version": "segment_set_gold_fact_partial_credit_v2",
+        "label_version": "segment_set_gold_fact_partial_credit_v3_judge_time",
+        "time_applicability_decided_by": "judge",
         "covered_gold_count": len(strict_full),
         "uncovered_gold_count": gold_total - len(strict_full),
         "covering_candidate_count": len({
@@ -218,6 +220,11 @@ def _validate_manifest(
         )
     if manifest.get("run_complete") is not True or manifest.get("status") != "complete":
         raise ValueError("set-Judge manifest is not complete")
+    policy = manifest.get("evaluation_policy") or {}
+    if policy.get("time_applicability_decided_by") != "judge":
+        raise ValueError(
+            "set-Judge manifest must use Judge-decided time applicability"
+        )
     checks = {
         "output_sha256": file_sha256(decisions_path),
         "references_sha256": file_sha256(references_path),

@@ -7,9 +7,8 @@ from pathlib import Path
 import pytest
 
 from infobudget.quality_router.segment_set_evaluation import (
-    _complete_sets_individually, _repair_instruction, _take_stratified,
-    _usage_totals,
-    gold_requires_exact_time,
+    _complete_sets_individually, _remaining_selected_tasks,
+    _repair_instruction, _take_stratified, _usage_totals,
     parse_segment_set_judgment,
 )
 from infobudget.rl_router.api import LLMResponse
@@ -25,8 +24,8 @@ def _task() -> dict:
             "segment_id": "seg-1",
             "segment_text": "Alice moved on May 20, 2023 and paints to relax.",
             "gold_facts": [
-                {"gold_fact_id": "g1", "text": "Alice moved on May 20, 2023.", "requires_exact_time": True},
-                {"gold_fact_id": "g2", "text": "Alice paints to relax.", "requires_exact_time": False},
+                {"gold_fact_id": "g1", "text": "Alice moved on May 20, 2023."},
+                {"gold_fact_id": "g2", "text": "Alice paints to relax."},
             ],
             "candidate_sets": [{
                 "set_id": "A",
@@ -66,13 +65,6 @@ def _response() -> dict:
     }
 
 
-def test_gold_exact_time_detection_is_conservative() -> None:
-    assert gold_requires_exact_time("Alice moved on May 20, 2023.") is True
-    assert gold_requires_exact_time("Alice moved in 2023.") is True
-    assert gold_requires_exact_time("Alice currently paints.") is False
-    assert gold_requires_exact_time("Alice moved last month.") is False
-
-
 def test_set_judge_accepts_partial_credit_with_time_failure() -> None:
     parsed = parse_segment_set_judgment(json.dumps(_response()), _task())
     first = parsed["candidate_set_results"][0]["gold_fact_assessments"][0]
@@ -80,11 +72,15 @@ def test_set_judge_accepts_partial_credit_with_time_failure() -> None:
     assert first["time_status"] == "MISSING_REQUIRED_EXACT_TIME"
 
 
-def test_set_judge_rejects_not_applicable_for_exact_time() -> None:
+def test_set_judge_preserves_judge_chosen_time_applicability() -> None:
     response = _response()
-    response["candidate_set_results"][0]["gold_fact_assessments"][0]["time_status"] = "NOT_APPLICABLE"
-    with pytest.raises(ValueError, match="time_status contradicts"):
-        parse_segment_set_judgment(json.dumps(response), _task())
+    gold = response["candidate_set_results"][0]["gold_fact_assessments"]
+    gold[0]["time_status"] = "NOT_APPLICABLE"
+    gold[1]["time_status"] = "MISSING_REQUIRED_EXACT_TIME"
+    parsed = parse_segment_set_judgment(json.dumps(response), _task())
+    returned = parsed["candidate_set_results"][0]["gold_fact_assessments"]
+    assert returned[0]["time_status"] == "NOT_APPLICABLE"
+    assert returned[1]["time_status"] == "MISSING_REQUIRED_EXACT_TIME"
 
 
 def test_set_judge_reports_all_detectable_semantic_errors() -> None:
@@ -105,13 +101,13 @@ def test_set_judge_reports_all_detectable_semantic_errors() -> None:
         ]
     response["candidate_set_results"].append(second_set)
     gold = response["candidate_set_results"][0]["gold_fact_assessments"]
-    gold[0]["time_status"] = "NOT_APPLICABLE"
+    gold[0]["time_status"] = "UNKNOWN"
     second_set["gold_fact_assessments"][1]["coverage_status"] = "SUPPORTED"
     with pytest.raises(ValueError) as exc_info:
         parse_segment_set_judgment(json.dumps(response), task)
     message = str(exc_info.value)
     assert "semantic validation failed with 2 error(s)" in message
-    assert "g1: time_status contradicts Gold time policy" in message
+    assert "g1: invalid time_status 'UNKNOWN'" in message
     assert "g2: invalid coverage_status 'SUPPORTED'" in message
 
 
@@ -120,11 +116,9 @@ def test_repair_instruction_includes_previous_json_and_full_policy() -> None:
     prompt = _repair_instruction(_task(), "example validation error", previous)
     assert previous in prompt
     assert "example validation error" in prompt
-    assert '"requires_exact_time": true' in prompt
-    assert (
-        '"allowed_time_statuses": ["PASS", "MISSING_REQUIRED_EXACT_TIME", '
-        '"CONTRADICTED_TIME"]' in prompt
-    )
+    assert "requires_exact_time" not in prompt
+    assert "Judge time applicability semantically" in prompt
+    assert "Relative or unusual time expressions may still be material" in prompt
     assert "Never use SUPPORTED or PARTIALLY_SUPPORTED as coverage_status" in prompt
     assert "2023-05-07 and May 7, 2023" in prompt
 
@@ -229,6 +223,19 @@ def test_pilot_selection_round_robins_conversations() -> None:
     selected = _take_stratified(rows, 6)
     assert [row["sample_id"] for row in selected] == [
         "conv-1", "conv-2", "conv-3", "conv-1", "conv-2", "conv-3"
+    ]
+
+
+def test_pilot_selection_is_stable_across_resume() -> None:
+    rows = [
+        {"sample_id": sample_id, "segment_id": f"{sample_id}-{index}"}
+        for sample_id in ("conv-1", "conv-2", "conv-3") for index in range(4)
+    ]
+    remaining = _remaining_selected_tasks(
+        rows, {"conv-1-0", "conv-2-0"}, max_segments=6
+    )
+    assert [row["segment_id"] for row in remaining] == [
+        "conv-3-0", "conv-1-1", "conv-2-1", "conv-3-1"
     ]
 
 

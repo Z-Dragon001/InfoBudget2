@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-import re
 import uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -19,8 +18,9 @@ from infobudget.schemas import ModelSpec, PriceSpec
 from infobudget.utils.text import count_tokens
 
 
-PROMPT_VERSION = "segment_fact_set_judge_v3"
-REPAIR_VERSION = "segment_fact_set_repair_v4_per_set_fallback"
+PROMPT_VERSION = "segment_fact_set_judge_v4"
+REPAIR_VERSION = "segment_fact_set_repair_v6_judge_time_authority"
+SELECTION_VERSION = "segment_fact_set_selection_v2_stable_resume"
 SCHEMA_VERSION = "segment_fact_set_judgment_v2"
 SEMANTIC_STATUSES = {
     "SUPPORTED", "PARTIALLY_SUPPORTED", "UNSUPPORTED", "CONTRADICTED"
@@ -29,12 +29,6 @@ COVERAGE_STATUSES = {"FULL", "PARTIAL", "NONE", "CONTRADICTED"}
 TIME_STATUSES = {
     "PASS", "MISSING_REQUIRED_EXACT_TIME", "CONTRADICTED_TIME", "NOT_APPLICABLE"
 }
-MONTHS = (
-    "january|february|march|april|may|june|july|august|"
-    "september|october|november|december"
-)
-
-
 def plan_segment_set_judging(
     *, segments_path: str | Path, references_path: str | Path,
     reference_manifest_path: str | Path, candidates_path: str | Path,
@@ -67,6 +61,7 @@ def plan_segment_set_judging(
         "judge_model": model_spec.effective_model_name,
         "prompt_version": PROMPT_VERSION,
         "repair_version": REPAIR_VERSION,
+        "selection_version": SELECTION_VERSION,
         "prompt_sha256": file_sha256(prompt_path),
         "segments_sha256": _path_digest(Path(segments_path)),
         "references_sha256": file_sha256(references_path),
@@ -120,6 +115,7 @@ def run_segment_set_judging(
         "prompt_sha256": file_sha256(prompt_path),
         "prompt_version": PROMPT_VERSION,
         "repair_version": REPAIR_VERSION,
+        "selection_version": SELECTION_VERSION,
         "judge_model": model_spec.effective_model_name,
         "anonymization_seed": int(anonymization_seed),
     }
@@ -140,11 +136,9 @@ def run_segment_set_judging(
         output_dir=output_dir, rows=list(completed.values()), identity=identity,
         total=len(tasks), price=price,
     )
-    remaining = [task for task in tasks if task["segment_id"] not in completed]
-    if max_segments is not None:
-        remaining = _take_stratified(
-            remaining, max(0, max_segments - len(completed))
-        )
+    remaining = _remaining_selected_tasks(
+        tasks, set(completed), max_segments
+    )
 
     for number, task in enumerate(remaining, start=1):
         prompt = _render(prompt_text, task["model_input"])
@@ -245,10 +239,10 @@ def parse_segment_set_judgment(
     _canonicalize_structural_ids(
         results, "set_id", list(expected_sets), "Candidate set"
     )
-    required_time = {
-        str(fact["gold_fact_id"]): bool(fact["requires_exact_time"])
+    expected_gold_order = [
+        str(fact["gold_fact_id"])
         for fact in task["model_input"]["gold_facts"]
-    }
+    ]
     clean_results = []
     validation_errors = []
     for result in results:
@@ -287,7 +281,7 @@ def parse_segment_set_judgment(
         if not isinstance(gold, list):
             raise ValueError(f"{set_id}: gold_fact_assessments must be a list")
         _canonicalize_structural_ids(
-            gold, "gold_fact_id", list(required_time), f"{set_id} Gold Fact"
+            gold, "gold_fact_id", expected_gold_order, f"{set_id} Gold Fact"
         )
         for item in gold:
             gold_id = str(item["gold_fact_id"])
@@ -302,12 +296,6 @@ def parse_segment_set_judgment(
                 validation_errors.append(
                     f"{set_id}/{gold_id}: invalid time_status {time_status!r}; "
                     f"allowed={sorted(TIME_STATUSES)}"
-                )
-            elif required_time[gold_id] == (
-                time_status == "NOT_APPLICABLE"
-            ):
-                validation_errors.append(
-                    f"{set_id}/{gold_id}: time_status contradicts Gold time policy"
                 )
             covering = item.get("covering_candidate_ids")
             covering_is_valid = not (
@@ -357,23 +345,6 @@ def parse_segment_set_judgment(
     }
 
 
-def gold_requires_exact_time(text: str) -> bool:
-    """Conservative, deterministic trigger for the user's exact-time hard gate."""
-    value = str(text).casefold()
-    patterns = (
-        r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b",
-        rf"\b(?:{MONTHS})\s+\d{{1,2}},?\s+(?:19|20)\d{{2}}\b",
-        rf"\b\d{{1,2}}\s+(?:{MONTHS})\s+(?:19|20)\d{{2}}\b",
-        rf"\b(?:{MONTHS})\s+(?:19|20)\d{{2}}\b",
-        r"\b(?:19|20)\d{2}\b",
-        r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b",
-        r"\b\d+(?:\.\d+)?\s+(?:day|week|month|year)s?\b",
-        r"\b(?:every\s+(?:day|week|month|year)|daily|weekly|monthly|yearly|"
-        r"\d+\s+times?\s+(?:a|per)\s+(?:day|week|month|year))\b",
-    )
-    return any(re.search(pattern, value) for pattern in patterns)
-
-
 def _canonicalize_structural_ids(
     items: Any, field: str, expected_order: list[str], label: str,
 ) -> None:
@@ -420,16 +391,6 @@ def _repair_instruction(
             str(item["gold_fact_id"])
             for item in gold_facts
         ],
-        "gold_time_policy_by_id": {
-            str(item["gold_fact_id"]): {
-                "requires_exact_time": bool(item["requires_exact_time"]),
-                "allowed_time_statuses": (
-                    ["PASS", "MISSING_REQUIRED_EXACT_TIME", "CONTRADICTED_TIME"]
-                    if item["requires_exact_time"] else ["NOT_APPLICABLE"]
-                ),
-            }
-            for item in gold_facts
-        },
     }
     return (
         "\n\nREPAIR_INSTRUCTION:\n"
@@ -441,11 +402,15 @@ def _repair_instruction(
         "- Copy every required set, Candidate, and Gold ID exactly once.\n"
         "- Candidate semantic_status and Gold coverage_status use different "
         "enums. Never use SUPPORTED or PARTIALLY_SUPPORTED as coverage_status.\n"
-        "- If requires_exact_time is false, time_status must be NOT_APPLICABLE.\n"
-        "- If requires_exact_time is true, time_status must never be "
-        "NOT_APPLICABLE. Use MISSING_REQUIRED_EXACT_TIME when no Candidate "
-        "preserves the required exact time, including when coverage is NONE; "
-        "use CONTRADICTED_TIME for a conflicting time.\n"
+        "- Judge time applicability semantically from each Gold Fact and the "
+        "Segment context; code does not pre-label it. Do not use a lexical or "
+        "regular-expression heuristic.\n"
+        "- Use NOT_APPLICABLE only when the Gold has no material temporal detail "
+        "that Candidate Facts need to preserve. Relative or unusual time "
+        "expressions may still be material.\n"
+        "- For a material Gold time, use PASS when Candidates preserve it, "
+        "MISSING_REQUIRED_EXACT_TIME when they omit or weaken it, and "
+        "CONTRADICTED_TIME when they conflict with it.\n"
         "- Equivalent date formats preserve exact time. For example, "
         "2023-05-07 and May 7, 2023 are the same date and must receive PASS.\n"
         "- Gold coverage_status measures non-temporal content. A Candidate can "
@@ -667,9 +632,6 @@ def _build_set_tasks(
             {
                 "gold_fact_id": str(fact["reference_fact_id"]),
                 "text": str(fact.get("text") or fact.get("fact_text")),
-                "requires_exact_time": gold_requires_exact_time(
-                    str(fact.get("text") or fact.get("fact_text"))
-                ),
             }
             for fact in reference_row["reference_facts"]
         ]
@@ -783,6 +745,7 @@ def _judgment_row(
         "set_model_map": task["model_by_set"],
         "prompt_version": PROMPT_VERSION,
         "repair_version": REPAIR_VERSION,
+        "selection_version": SELECTION_VERSION,
         "prompt_sha256": identity["prompt_sha256"],
         "judge_model": model_spec.effective_model_name,
         "judged_at": datetime.now(timezone.utc).isoformat(),
@@ -869,6 +832,7 @@ def _write_current_artifacts(
             "redundancy_evaluated": False,
             "gold_decomposition_used": False,
             "exact_gold_time_is_hard_gate": True,
+            "time_applicability_decided_by": "judge",
         },
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -1019,6 +983,21 @@ def _take_stratified(
         if not progressed:
             break
     return selected
+
+
+def _remaining_selected_tasks(
+    tasks: list[dict[str, Any]], completed_segment_ids: set[str],
+    max_segments: int | None,
+) -> list[dict[str, Any]]:
+    """Freeze the stratified target before removing completed work."""
+    selected = (
+        tasks if max_segments is None
+        else _take_stratified(tasks, max_segments)
+    )
+    return [
+        task for task in selected
+        if str(task["segment_id"]) not in completed_segment_ids
+    ]
 
 
 def _segment_sort_key(row: dict[str, Any]) -> tuple[str, int, str]:
