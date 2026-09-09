@@ -22,7 +22,10 @@ def main() -> None:
     parser.add_argument("--reference-manifest", type=Path, required=True)
     parser.add_argument("--candidates", type=Path, required=True)
     parser.add_argument("--candidate-inventory", type=Path, required=True)
-    parser.add_argument("--prompt", type=Path, default=Path("configs/prompts/segment_fact_set_judge_v2.txt"))
+    parser.add_argument(
+        "--prompt", type=Path,
+        default=Path("configs/prompts/segment_fact_set_judge_v3.txt"),
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--anonymization-seed", type=int, default=42)

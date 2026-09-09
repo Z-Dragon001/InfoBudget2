@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
 import pytest
 
 from infobudget.quality_router.segment_set_evaluation import (
-    _take_stratified, _usage_totals, gold_requires_exact_time,
+    _repair_instruction, _take_stratified, _usage_totals,
+    gold_requires_exact_time,
     parse_segment_set_judgment,
 )
 
@@ -80,6 +82,48 @@ def test_set_judge_rejects_not_applicable_for_exact_time() -> None:
     response["candidate_set_results"][0]["gold_fact_assessments"][0]["time_status"] = "NOT_APPLICABLE"
     with pytest.raises(ValueError, match="time_status contradicts"):
         parse_segment_set_judgment(json.dumps(response), _task())
+
+
+def test_set_judge_reports_all_detectable_semantic_errors() -> None:
+    task = _task()
+    task["model_by_set"]["B"] = "model-b"
+    task["model_input"]["candidate_sets"].append({
+        "set_id": "B",
+        "facts": [{"candidate_id": "c2", "text": "Alice moved."}],
+    })
+    response = _response()
+    second_set = copy.deepcopy(response["candidate_set_results"][0])
+    second_set["set_id"] = "B"
+    second_set["candidate_assessments"][0]["candidate_id"] = "c2"
+    for gold in second_set["gold_fact_assessments"]:
+        gold["covering_candidate_ids"] = [
+            "c2" if candidate_id == "c1" else candidate_id
+            for candidate_id in gold["covering_candidate_ids"]
+        ]
+    response["candidate_set_results"].append(second_set)
+    gold = response["candidate_set_results"][0]["gold_fact_assessments"]
+    gold[0]["time_status"] = "NOT_APPLICABLE"
+    second_set["gold_fact_assessments"][1]["coverage_status"] = "SUPPORTED"
+    with pytest.raises(ValueError) as exc_info:
+        parse_segment_set_judgment(json.dumps(response), task)
+    message = str(exc_info.value)
+    assert "semantic validation failed with 2 error(s)" in message
+    assert "g1: time_status contradicts Gold time policy" in message
+    assert "g2: invalid coverage_status 'SUPPORTED'" in message
+
+
+def test_repair_instruction_includes_previous_json_and_full_policy() -> None:
+    previous = '{"segment_id":"seg-1","candidate_set_results":[]}'
+    prompt = _repair_instruction(_task(), "example validation error", previous)
+    assert previous in prompt
+    assert "example validation error" in prompt
+    assert '"requires_exact_time": true' in prompt
+    assert (
+        '"allowed_time_statuses": ["PASS", "MISSING_REQUIRED_EXACT_TIME", '
+        '"CONTRADICTED_TIME"]' in prompt
+    )
+    assert "Never use SUPPORTED or PARTIALLY_SUPPORTED as coverage_status" in prompt
+    assert "2023-05-07 and May 7, 2023" in prompt
 
 
 def test_set_judge_rejects_full_coverage_without_candidate_ids() -> None:

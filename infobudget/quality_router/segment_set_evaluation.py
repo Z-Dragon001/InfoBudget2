@@ -19,7 +19,8 @@ from infobudget.schemas import ModelSpec, PriceSpec
 from infobudget.utils.text import count_tokens
 
 
-PROMPT_VERSION = "segment_fact_set_judge_v2"
+PROMPT_VERSION = "segment_fact_set_judge_v3"
+REPAIR_VERSION = "segment_fact_set_repair_v3_previous_response_and_policy"
 SCHEMA_VERSION = "segment_fact_set_judgment_v2"
 SEMANTIC_STATUSES = {
     "SUPPORTED", "PARTIALLY_SUPPORTED", "UNSUPPORTED", "CONTRADICTED"
@@ -65,6 +66,7 @@ def plan_segment_set_judging(
         "logical_api_call_count": len(tasks),
         "judge_model": model_spec.effective_model_name,
         "prompt_version": PROMPT_VERSION,
+        "repair_version": REPAIR_VERSION,
         "prompt_sha256": file_sha256(prompt_path),
         "segments_sha256": _path_digest(Path(segments_path)),
         "references_sha256": file_sha256(references_path),
@@ -117,6 +119,7 @@ def run_segment_set_judging(
         "candidate_inventory_sha256": file_sha256(candidate_inventory_path),
         "prompt_sha256": file_sha256(prompt_path),
         "prompt_version": PROMPT_VERSION,
+        "repair_version": REPAIR_VERSION,
         "judge_model": model_spec.effective_model_name,
         "anonymization_seed": int(anonymization_seed),
     }
@@ -150,10 +153,13 @@ def run_segment_set_judging(
         response = None
         response_prompt = prompt
         validation_error = ""
+        previous_response = ""
         for semantic_attempt in range(semantic_retries + 1):
             repair_prompt = prompt
             if validation_error:
-                repair_prompt += _repair_instruction(task, validation_error)
+                repair_prompt += _repair_instruction(
+                    task, validation_error, previous_response
+                )
             try:
                 response = client.complete(
                     model_spec=model_spec, prompt=repair_prompt,
@@ -169,6 +175,7 @@ def run_segment_set_judging(
                 parsed = parse_segment_set_judgment(response.content, task)
             except ValueError as exc:
                 validation_error = str(exc)
+                previous_response = response.content
                 _archive_call(
                     output_dir, segment_id, repair_prompt,
                     "invalid_semantic_response", response.content, response,
@@ -230,6 +237,7 @@ def parse_segment_set_judgment(
         for fact in task["model_input"]["gold_facts"]
     }
     clean_results = []
+    validation_errors = []
     for result in results:
         set_id = str(result["set_id"])
         candidate_ids = {
@@ -252,12 +260,14 @@ def parse_segment_set_judgment(
             candidate_id = str(item["candidate_id"])
             status = item.get("semantic_status")
             if status not in SEMANTIC_STATUSES:
-                raise ValueError(
+                validation_errors.append(
                     f"{set_id}/{candidate_id}: invalid semantic_status"
                 )
             status_by_candidate[candidate_id] = status
-            _require_string_lists(
-                item, ("supported_content", "unsupported_or_incorrect_content")
+            _collect_string_list_errors(
+                validation_errors, item,
+                ("supported_content", "unsupported_or_incorrect_content"),
+                f"{set_id}/{candidate_id}",
             )
 
         gold = result.get("gold_fact_assessments")
@@ -268,41 +278,65 @@ def parse_segment_set_judgment(
         )
         for item in gold:
             gold_id = str(item["gold_fact_id"])
-            if item.get("coverage_status") not in COVERAGE_STATUSES:
-                raise ValueError(f"{set_id}/{gold_id}: invalid coverage_status")
+            coverage_status = item.get("coverage_status")
+            if coverage_status not in COVERAGE_STATUSES:
+                validation_errors.append(
+                    f"{set_id}/{gold_id}: invalid coverage_status "
+                    f"{coverage_status!r}; allowed={sorted(COVERAGE_STATUSES)}"
+                )
             time_status = item.get("time_status")
             if time_status not in TIME_STATUSES:
-                raise ValueError(f"{set_id}/{gold_id}: invalid time_status")
-            if required_time[gold_id] == (time_status == "NOT_APPLICABLE"):
-                raise ValueError(
+                validation_errors.append(
+                    f"{set_id}/{gold_id}: invalid time_status {time_status!r}; "
+                    f"allowed={sorted(TIME_STATUSES)}"
+                )
+            elif required_time[gold_id] == (
+                time_status == "NOT_APPLICABLE"
+            ):
+                validation_errors.append(
                     f"{set_id}/{gold_id}: time_status contradicts Gold time policy"
                 )
             covering = item.get("covering_candidate_ids")
-            if (
+            covering_is_valid = not (
                 not isinstance(covering, list)
                 or not set(map(str, covering)).issubset(candidate_ids)
-            ):
-                raise ValueError(
+            )
+            if not covering_is_valid:
+                validation_errors.append(
                     f"{set_id}/{gold_id}: invalid covering_candidate_ids"
                 )
-            if item["coverage_status"] in {"FULL", "PARTIAL"} and not covering:
-                raise ValueError(
+            if (
+                coverage_status in {"FULL", "PARTIAL"}
+                and covering_is_valid and not covering
+            ):
+                validation_errors.append(
                     f"{set_id}/{gold_id}: covered Gold needs Candidate IDs"
                 )
-            if time_status == "MISSING_REQUIRED_EXACT_TIME":
+            if (
+                time_status == "MISSING_REQUIRED_EXACT_TIME"
+                and covering_is_valid
+            ):
                 invalid = [
                     candidate_id for candidate_id in map(str, covering)
                     if status_by_candidate[candidate_id] == "SUPPORTED"
                 ]
                 if invalid:
-                    raise ValueError(
+                    validation_errors.append(
                         f"{set_id}/{gold_id}: Candidates missing exact time "
                         f"cannot be SUPPORTED: {invalid}"
                     )
-            _require_string_lists(
-                item, ("covered_content", "missing_or_incorrect_content")
+            _collect_string_list_errors(
+                validation_errors, item,
+                ("covered_content", "missing_or_incorrect_content"),
+                f"{set_id}/{gold_id}",
             )
         clean_results.append(result)
+    if validation_errors:
+        details = "\n".join(f"- {error}" for error in validation_errors)
+        raise ValueError(
+            f"semantic validation failed with {len(validation_errors)} "
+            f"error(s):\n{details}"
+        )
     clean_results.sort(key=lambda item: item["set_id"])
     return {
         "segment_id": task["segment_id"],
@@ -350,11 +384,19 @@ def _canonicalize_structural_ids(
     )
 
 
-def _repair_instruction(task: dict[str, Any], validation_error: str) -> str:
+def _repair_instruction(
+    task: dict[str, Any], validation_error: str, previous_response: str
+) -> str:
     candidate_sets = task["model_input"]["candidate_sets"]
+    gold_facts = task["model_input"]["gold_facts"]
     requirements = {
         "segment_id": task["segment_id"],
         "set_ids": [str(item["set_id"]) for item in candidate_sets],
+        "allowed_statuses": {
+            "candidate_semantic_status": sorted(SEMANTIC_STATUSES),
+            "gold_coverage_status": sorted(COVERAGE_STATUSES),
+            "gold_time_status": sorted(TIME_STATUSES),
+        },
         "candidate_ids_by_set": {
             str(item["set_id"]): [
                 str(fact["candidate_id"]) for fact in item["facts"]
@@ -363,17 +405,46 @@ def _repair_instruction(task: dict[str, Any], validation_error: str) -> str:
         },
         "gold_fact_ids_required_in_every_set": [
             str(item["gold_fact_id"])
-            for item in task["model_input"]["gold_facts"]
+            for item in gold_facts
         ],
+        "gold_time_policy_by_id": {
+            str(item["gold_fact_id"]): {
+                "requires_exact_time": bool(item["requires_exact_time"]),
+                "allowed_time_statuses": (
+                    ["PASS", "MISSING_REQUIRED_EXACT_TIME", "CONTRADICTED_TIME"]
+                    if item["requires_exact_time"] else ["NOT_APPLICABLE"]
+                ),
+            }
+            for item in gold_facts
+        },
     }
     return (
         "\n\nREPAIR_INSTRUCTION:\n"
-        f"The previous JSON failed validation: {validation_error}\n"
-        "Return a complete replacement JSON object, not a patch. Copy every "
-        "required ID below exactly once. Do not invent, abbreviate, replace, "
-        "or duplicate IDs. Preserve the intended semantic judgments while "
-        "repairing the structure.\nREQUIRED_STRUCTURE:\n"
+        "The previous response is included below as data. Repair that response; "
+        "do not regenerate unrelated judgments from scratch. Return one complete "
+        "replacement JSON object, not a patch or explanation.\n"
+        f"VALIDATION_ERRORS:\n{validation_error}\n"
+        "MANDATORY_REPAIR_RULES:\n"
+        "- Copy every required set, Candidate, and Gold ID exactly once.\n"
+        "- Candidate semantic_status and Gold coverage_status use different "
+        "enums. Never use SUPPORTED or PARTIALLY_SUPPORTED as coverage_status.\n"
+        "- If requires_exact_time is false, time_status must be NOT_APPLICABLE.\n"
+        "- If requires_exact_time is true, time_status must never be "
+        "NOT_APPLICABLE. Use MISSING_REQUIRED_EXACT_TIME when no Candidate "
+        "preserves the required exact time, including when coverage is NONE; "
+        "use CONTRADICTED_TIME for a conflicting time.\n"
+        "- Equivalent date formats preserve exact time. For example, "
+        "2023-05-07 and May 7, 2023 are the same date and must receive PASS.\n"
+        "- Gold coverage_status measures non-temporal content. A Candidate can "
+        "provide FULL non-temporal coverage while receiving "
+        "MISSING_REQUIRED_EXACT_TIME; the time hard gate is represented "
+        "separately by time_status.\n"
+        "- Preserve valid judgments from the previous response and change every "
+        "field identified by validation errors or mandatory rules.\n"
+        "REQUIRED_STRUCTURE_AND_POLICY:\n"
         + json.dumps(requirements, ensure_ascii=False, sort_keys=True)
+        + "\nPREVIOUS_INVALID_RESPONSE:\n"
+        + previous_response
     )
 
 
@@ -679,8 +750,8 @@ def _json_object(content: str) -> dict[str, Any]:
     return value
 
 
-def _require_string_lists(
-    item: dict[str, Any], fields: Iterable[str]
+def _collect_string_list_errors(
+    errors: list[str], item: dict[str, Any], fields: Iterable[str], context: str,
 ) -> None:
     for field in fields:
         value = item.get(field)
@@ -688,7 +759,7 @@ def _require_string_lists(
             not isinstance(value, list)
             or any(not isinstance(element, str) for element in value)
         ):
-            raise ValueError(f"{field} must be a list of strings")
+            errors.append(f"{context}: {field} must be a list of strings")
 
 
 def _max_tokens(task: dict[str, Any], model: ModelSpec) -> int:
