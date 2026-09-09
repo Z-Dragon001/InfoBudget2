@@ -206,27 +206,22 @@ The quality-router pre-training artifact sequence is now segment-set based. It d
 enumerate Candidate/Gold pairs, check source-turn provenance, or score redundancy:
 
 ```powershell
-# 1. Normalize reviewed Gold Facts into frozen claim/time evaluation units.
-uv run python scripts/build_gold_evaluation_units.py `
-  --references <reviewed-reference-facts.jsonl> `
-  --output-dir <gold-unit-run-dir> `
-  --output <gold_evaluation_units.jsonl>
-
-# 2. Judge all anonymous model Fact sets together, one Segment per API call.
+# 1. Judge all anonymous model Fact sets against reviewed Gold Facts,
+#    one Segment per API call. Gold Facts are not decomposed.
 uv run python scripts/judge_segment_fact_sets.py `
   --segments <segmented-root> `
-  --gold-units <gold_evaluation_units.jsonl> `
-  --gold-units-manifest <gold-unit-run-dir/manifest.json> `
+  --references <reviewed-reference-facts.jsonl> `
+  --reference-manifest <reviewed-reference-manifest.json> `
   --candidates <candidate_facts.jsonl> `
   --candidate-inventory <candidate_inventory.json> `
   --output-dir <segment-set-judge-run-dir> `
   --output <segment_fact_set_judgments.jsonl>
 
-# 3. Deterministically compute correctness, claim/time recall, and F2 labels.
+# 2. Deterministically compute partial-credit Gold coverage and F2 labels.
 uv run python scripts/build_fact_quality_labels.py `
   --judge-decisions <segment_fact_set_judgments.jsonl> `
   --judge-manifest <segment-set-judge-run-dir/manifest.json> `
-  --gold-units <gold_evaluation_units.jsonl> `
+  --references <reviewed-reference-facts.jsonl> `
   --candidates <candidate_facts.jsonl> `
   --capabilities <model_capabilities.json> `
   --output <fact_quality_labels.jsonl>

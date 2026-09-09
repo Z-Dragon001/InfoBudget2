@@ -15,7 +15,7 @@ from infobudget.rl_router.ledger import atomic_write_json
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--segments", type=Path, required=True)
-    parser.add_argument("--gold-units", type=Path, required=True)
+    parser.add_argument("--references", type=Path, required=True)
     parser.add_argument("--candidates", type=Path, required=True)
     parser.add_argument("--judgments", type=Path, required=True)
     parser.add_argument("--jsonl-output", type=Path, required=True)
@@ -24,7 +24,10 @@ def main() -> None:
     args = parser.parse_args()
 
     segments = {str(row["segment_id"]): str(row["text"]) for row in iter_jsonl(args.segments) if "segment_id" in row and "text" in row}
-    units = {str(row["segment_id"]): row for row in iter_jsonl(args.gold_units)}
+    references = {
+        str(row["segment_id"]): row for row in iter_jsonl(args.references)
+        if isinstance(row.get("reference_facts"), list)
+    }
     candidates: dict[tuple[str, str], list[dict[str, str]]] = {}
     for row in iter_jsonl(args.candidates):
         key = (str(row["segment_id"]), str(row.get("model_id") or row.get("extractor_model")))
@@ -35,17 +38,14 @@ def main() -> None:
     rows: list[dict[str, Any]] = []
     for judgment in iter_jsonl(args.judgments):
         segment_id = str(judgment["segment_id"])
-        if segment_id not in segments or segment_id not in units:
+        if segment_id not in segments or segment_id not in references:
             raise ValueError(f"review inputs are missing segment: {segment_id}")
-        gold_claims = [
+        gold_facts = [
             {
-                "gold_fact_id": fact["gold_fact_id"],
-                "claim_id": unit["claim_id"],
-                "claim_text": unit["claim_text"],
-                "required_time": unit["required_time"],
+                "gold_fact_id": fact["reference_fact_id"],
+                "gold_fact_text": fact.get("text") or fact.get("fact_text"),
             }
-            for fact in units[segment_id]["gold_facts"]
-            for unit in fact["claim_units"]
+            for fact in references[segment_id]["reference_facts"]
         ]
         for result in judgment["candidate_set_results"]:
             model_id = str(result["model_id"])
@@ -54,10 +54,10 @@ def main() -> None:
                 "split": judgment["split"], "sample_id": judgment["sample_id"],
                 "segment_id": segment_id, "model_id": model_id,
                 "segment_text": segments[segment_id],
-                "gold_claims": gold_claims,
+                "gold_facts": gold_facts,
                 "candidate_facts": sorted(candidates.get((segment_id, model_id), []), key=lambda item: item["candidate_id"]),
                 "candidate_assessments": result["candidate_assessments"],
-                "gold_claim_assessments": result["gold_claim_assessments"],
+                "gold_fact_assessments": result["gold_fact_assessments"],
                 "review_status": "", "review_notes": "",
             })
     rows.sort(key=lambda row: (row["sample_id"], row["segment_id"], row["model_id"]))
@@ -69,7 +69,7 @@ def main() -> None:
         "segment_count": len({row["segment_id"] for row in rows}),
         "model_count": len({row["model_id"] for row in rows}),
         "review_scope": {"source_provenance": False, "redundancy": False, "semantic_and_temporal": True},
-        "gold_units_sha256": file_sha256(args.gold_units),
+        "references_sha256": file_sha256(args.references),
         "candidates_sha256": file_sha256(args.candidates),
         "judgments_sha256": file_sha256(args.judgments),
         "jsonl_output": str(args.jsonl_output.resolve()),

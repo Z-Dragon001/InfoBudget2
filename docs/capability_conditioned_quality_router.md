@@ -34,15 +34,15 @@ without retraining it.
 
 1. `model_capabilities.json`: validated by `configs/model_capabilities.schema.json`.
 2. `reference_facts.jsonl`: the reviewed, frozen Gold Fact set per segment.
-3. `gold_evaluation_units.jsonl`: frozen Gold claim units and explicit-time requirements.
-4. candidate Fact JSONL or a Qdrant human-inspection export.
-5. `segment_fact_set_judgments.jsonl`: one decision per Segment containing anonymous
-   Candidate-set correctness and Gold-claim coverage. Source IDs and redundancy are outside
+3. candidate Fact JSONL or a Qdrant human-inspection export.
+4. `segment_fact_set_judgments.jsonl`: one decision per Segment containing anonymous
+   Candidate-set correctness and original-Gold-Fact coverage. Source IDs, Gold decomposition,
+   and redundancy are outside
    this protocol.
-6. `fact_quality_labels.jsonl`: deterministic scalar labels built by
+5. `fact_quality_labels.jsonl`: deterministic scalar labels built by
    `scripts/build_fact_quality_labels.py`.
-7. separate train and validation label files whose sample IDs do not overlap.
-8. `segment_model_costs.jsonl`: one non-negative absolute cost for each segment/model pair.
+6. separate train and validation label files whose sample IDs do not overlap.
+7. `segment_model_costs.jsonl`: one non-negative absolute cost for each segment/model pair.
 
 The training CLI refuses sample-level train/validation overlap. A checkpoint freezes the
 embedding name/dimension, structural scaler, MemoryPrint dimension order, label hashes and

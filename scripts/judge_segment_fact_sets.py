@@ -18,11 +18,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-dir", type=Path, default=Path("configs"))
     parser.add_argument("--segments", type=Path, required=True)
-    parser.add_argument("--gold-units", type=Path, required=True)
-    parser.add_argument("--gold-units-manifest", type=Path, required=True)
+    parser.add_argument("--references", type=Path, required=True)
+    parser.add_argument("--reference-manifest", type=Path, required=True)
     parser.add_argument("--candidates", type=Path, required=True)
     parser.add_argument("--candidate-inventory", type=Path, required=True)
-    parser.add_argument("--prompt", type=Path, default=Path("configs/prompts/segment_fact_set_judge_v1.txt"))
+    parser.add_argument("--prompt", type=Path, default=Path("configs/prompts/segment_fact_set_judge_v2.txt"))
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--anonymization-seed", type=int, default=42)
@@ -35,8 +35,8 @@ def main() -> None:
     model = bundle.project.models["judge_llm"]
     price = bundle.project.prices[model.model_name]
     common = dict(
-        segments_path=args.segments, gold_units_path=args.gold_units,
-        gold_units_manifest_path=args.gold_units_manifest,
+        segments_path=args.segments, references_path=args.references,
+        reference_manifest_path=args.reference_manifest,
         candidates_path=args.candidates,
         candidate_inventory_path=args.candidate_inventory,
         prompt_path=args.prompt,

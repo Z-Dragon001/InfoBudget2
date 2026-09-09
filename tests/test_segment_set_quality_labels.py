@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from scripts.build_fact_quality_labels import _score_result
 
 
-def test_score_result_applies_temporal_hard_gate_and_f2() -> None:
+def test_score_result_gives_partial_credit_but_applies_time_hard_gate() -> None:
     judgment = {
         "dataset_name": "locomo", "split": "full", "sample_id": "conv-1",
         "segment_id": "seg-1",
@@ -14,28 +16,27 @@ def test_score_result_applies_temporal_hard_gate_and_f2() -> None:
             {"candidate_id": "c1", "semantic_status": "SUPPORTED"},
             {"candidate_id": "c2", "semantic_status": "PARTIALLY_SUPPORTED"},
         ],
-        "gold_claim_assessments": [
+        "gold_fact_assessments": [
             {
-                "gold_fact_id": "g1", "claim_id": "g1:C1",
-                "content_status": "COVERED", "time_status": "MISSING_REQUIRED_EXACT_TIME",
+                "gold_fact_id": "g1", "coverage_status": "FULL",
+                "time_status": "MISSING_REQUIRED_EXACT_TIME",
                 "covering_candidate_ids": ["c1"],
             },
             {
-                "gold_fact_id": "g1", "claim_id": "g1:C2",
-                "content_status": "COVERED", "time_status": "NOT_APPLICABLE",
+                "gold_fact_id": "g2", "coverage_status": "PARTIAL",
+                "time_status": "NOT_APPLICABLE",
                 "covering_candidate_ids": ["c2"],
             },
         ],
     }
     label, _ = _score_result(
         judgment=judgment, result=result,
-        claims_by_fact={"g1": ["g1:C1", "g1:C2"]},
-        required_time={"g1:C1": True, "g1:C2": False},
-        profile_id="profile-a", candidate_extraction_run_id="run-a",
-        reference_set_hash="hash-a",
+        gold_time={"g1": True, "g2": False}, profile_id="profile-a",
+        candidate_extraction_run_id="run-a", reference_set_hash="hash-a",
     )
     assert label["strict_candidate_precision"] == 0.5
-    assert label["strict_claim_recall"] == 0.5
+    assert label["partial_credit_candidate_precision"] == 0.75
     assert label["strict_gold_fact_recall"] == 0.0
+    assert label["partial_credit_gold_coverage"] == 0.25
     assert label["temporal_recall"] == 0.0
-    assert label["set_quality_f2"] == 0.5
+    assert label["set_quality_f2"] == pytest.approx(0.2884615385)
