@@ -84,21 +84,21 @@ def test_gold_units_preserve_fact_and_freeze_exact_time() -> None:
         "segment_id": "seg-1",
         "gold_facts": [
             {
-                "gold_fact_id": "g1",
+                "gold_fact_id": "gold_fact_id",
                 "original_text": "Alice moved on May 20, 2023 and started painting.",
                 "claim_units": [
                     {
-                        "claim_id": "g1:C1",
+                        "claim_id": "gold_fact_id:C1",
                         "claim_text": "Alice moved.",
                         "required_time": {
-                            "required": True,
+                            "required": "true",
                             "normalized_value": "2023-05-20",
                             "resolution": "day",
                             "surface_form": "May 20, 2023",
                         },
                     },
                     {
-                        "claim_id": "g1:C2",
+                        "claim_id": "gold_fact_id:C1",
                         "claim_text": "Alice started painting.",
                         "required_time": {
                             "required": True,
@@ -112,6 +112,10 @@ def test_gold_units_preserve_fact_and_freeze_exact_time() -> None:
         ],
     }
     parsed = parse_gold_evaluation_units(json.dumps(payload), _reference_row())
+    assert [
+        unit["claim_id"]
+        for unit in parsed["gold_facts"][0]["claim_units"]
+    ] == ["g1:C1", "g1:C2"]
     assert parsed["gold_facts"][0]["claim_units"][0]["required_time"]["required"] is True
     assert parsed["gold_facts"][0]["claim_units"][1]["required_time"] == {
         "required": False,

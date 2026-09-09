@@ -95,7 +95,7 @@ def run_gold_evaluation_units(
     manifest_path = output_dir / "manifest.json"
     _require_resume_identity(manifest_path, identity)
     ledger = SqliteLedger(output_dir / "evaluation.sqlite3", "gold_units", key_fields=("segment_id",))
-    recovered_count = _recover_gold_archives(
+    _recover_gold_archives(
         output_dir=output_dir,
         references=references,
         ledger=ledger,
@@ -115,7 +115,7 @@ def run_gold_evaluation_units(
     )
     remaining = [row for row in references if str(row["segment_id"]) not in completed]
     if max_segments is not None:
-        remaining = _take_stratified(remaining, max(0, max_segments - recovered_count))
+        remaining = _take_stratified(remaining, max(0, max_segments - len(completed)))
 
     for number, reference_row in enumerate(remaining, start=1):
         request = _gold_request(reference_row)
@@ -234,7 +234,7 @@ def run_segment_set_judging(
     atomic_write_json(manifest_path, initial_manifest)
     remaining = [task for task in tasks if task["segment_id"] not in completed]
     if max_segments is not None:
-        remaining = _take_stratified(remaining, max_segments)
+        remaining = _take_stratified(remaining, max(0, max_segments - len(completed)))
 
     for number, task in enumerate(remaining, start=1):
         prompt = _render(prompt_text, task["model_input"])
@@ -298,34 +298,53 @@ def parse_gold_evaluation_units(content: str, reference_row: dict[str, Any]) -> 
     if payload.get("segment_id") != segment_id:
         raise ValueError("segment_id mismatch")
     supplied = {str(item["reference_fact_id"]): str(item.get("text") or item.get("fact_text")) for item in reference_row["reference_facts"]}
+    supplied_order = list(supplied)
+    supplied_by_text: dict[str, list[str]] = defaultdict(list)
+    for supplied_id, supplied_text in supplied.items():
+        supplied_by_text[supplied_text].append(supplied_id)
     facts = payload.get("gold_facts")
     if not isinstance(facts, list):
         raise ValueError("gold_facts must be a list")
-    returned_ids = [str(item.get("gold_fact_id") or "") for item in facts if isinstance(item, dict)]
-    if len(facts) != len(returned_ids) or set(returned_ids) != set(supplied) or len(returned_ids) != len(set(returned_ids)):
-        raise ValueError("Gold Fact IDs are missing, extra, or duplicated")
+    if len(facts) != len(supplied) or any(not isinstance(item, dict) for item in facts):
+        raise ValueError("Gold Facts are missing, extra, or not objects")
     claim_ids: set[str] = set()
+    used_fact_ids: set[str] = set()
     normalized: list[dict[str, Any]] = []
     for fact in facts:
-        fact_id = str(fact["gold_fact_id"])
-        if fact.get("original_text") != supplied[fact_id]:
-            raise ValueError(f"{fact_id}: original_text changed")
+        returned_id = str(fact.get("gold_fact_id") or "")
+        fact_id = returned_id if returned_id in supplied and returned_id not in used_fact_ids else ""
+        if not fact_id:
+            text_matches = [
+                candidate_id
+                for candidate_id in supplied_by_text.get(str(fact.get("original_text") or ""), [])
+                if candidate_id not in used_fact_ids
+            ]
+            if len(text_matches) == 1:
+                fact_id = text_matches[0]
+        if not fact_id:
+            raise ValueError(
+                "Gold Fact ID cannot be recovered from a valid ID or exact original_text"
+            )
+        used_fact_ids.add(fact_id)
         units = fact.get("claim_units")
         if not isinstance(units, list) or not units:
             raise ValueError(f"{fact_id}: claim_units must be non-empty")
         clean_units = []
-        for unit in units:
+        for unit_index, unit in enumerate(units, start=1):
             if not isinstance(unit, dict):
                 raise ValueError(f"{fact_id}: claim unit must be an object")
-            claim_id = str(unit.get("claim_id") or "")
-            if not claim_id.startswith(f"{fact_id}:C") or claim_id in claim_ids:
-                raise ValueError(f"invalid or duplicate claim_id: {claim_id!r}")
+            # Claim IDs are structural identifiers, not model judgments. Models
+            # sometimes copy the schema placeholder literally, so generate the
+            # canonical ID deterministically from the verified Gold ID/order.
+            claim_id = f"{fact_id}:C{unit_index}"
+            if claim_id in claim_ids:
+                raise ValueError(f"duplicate canonical claim_id: {claim_id!r}")
             claim_ids.add(claim_id)
             claim_text = str(unit.get("claim_text") or "").strip()
             time = unit.get("required_time")
-            if not claim_text or not isinstance(time, dict) or not isinstance(time.get("required"), bool):
+            if not claim_text or not isinstance(time, dict):
                 raise ValueError(f"{claim_id}: invalid claim text/time object")
-            required = time["required"]
+            required = _normalize_json_boolean(time.get("required"), claim_id)
             resolution = _normalize_time_resolution(time.get("resolution"))
             surface = str(time.get("surface_form") or "").strip().casefold()
             if required and resolution is None:
@@ -346,7 +365,7 @@ def parse_gold_evaluation_units(content: str, reference_row: dict[str, Any]) -> 
                     "surface_form": None,
                 }
             else:
-                time = {**time, "resolution": resolution}
+                time = {**time, "required": True, "resolution": resolution}
             resolution = time.get("resolution")
             if resolution not in TIME_RESOLUTIONS:
                 raise ValueError(f"{claim_id}: invalid time resolution {resolution!r}")
@@ -356,7 +375,7 @@ def parse_gold_evaluation_units(content: str, reference_row: dict[str, Any]) -> 
                 raise ValueError(f"{claim_id}: required time needs surface_form")
             clean_units.append({"claim_id": claim_id, "claim_text": claim_text, "required_time": time})
         normalized.append({"gold_fact_id": fact_id, "original_text": supplied[fact_id], "claim_units": clean_units})
-    normalized.sort(key=lambda item: returned_ids.index(item["gold_fact_id"]))
+    normalized.sort(key=lambda item: supplied_order.index(item["gold_fact_id"]))
     return {"segment_id": segment_id, "gold_facts": normalized}
 
 
@@ -508,6 +527,14 @@ def _normalize_time_resolution(value: Any) -> str | None:
     if normalized in NULL_LIKE_TIME_VALUES:
         return None
     return TIME_RESOLUTION_ALIASES.get(normalized, normalized)
+
+
+def _normalize_json_boolean(value: Any, claim_id: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().casefold() in {"true", "false"}:
+        return value.strip().casefold() == "true"
+    raise ValueError(f"{claim_id}: required_time.required must be a boolean")
 
 
 def _infer_time_resolution(value: Any) -> str | None:
