@@ -7,10 +7,13 @@ from pathlib import Path
 import pytest
 
 from infobudget.quality_router.segment_set_evaluation import (
-    _repair_instruction, _take_stratified, _usage_totals,
+    _complete_sets_individually, _repair_instruction, _take_stratified,
+    _usage_totals,
     gold_requires_exact_time,
     parse_segment_set_judgment,
 )
+from infobudget.rl_router.api import LLMResponse
+from infobudget.schemas import ModelSpec
 
 
 def _task() -> dict:
@@ -124,6 +127,71 @@ def test_repair_instruction_includes_previous_json_and_full_policy() -> None:
     )
     assert "Never use SUPPORTED or PARTIALLY_SUPPORTED as coverage_status" in prompt
     assert "2023-05-07 and May 7, 2023" in prompt
+
+
+def test_per_set_fallback_salvages_valid_set_and_calls_only_invalid_set(
+    tmp_path: Path,
+) -> None:
+    task = _task()
+    task["model_by_set"]["B"] = "model-b"
+    task["model_input"]["candidate_sets"].append({
+        "set_id": "B",
+        "facts": [{"candidate_id": "c2", "text": "Alice moved."}],
+    })
+
+    previous = _response()
+    invalid_b = copy.deepcopy(previous["candidate_set_results"][0])
+    invalid_b["set_id"] = "B"
+    invalid_b["candidate_assessments"][0]["candidate_id"] = "c2"
+    invalid_b["gold_fact_assessments"] = invalid_b["gold_fact_assessments"][:1]
+    invalid_b["gold_fact_assessments"][0]["covering_candidate_ids"] = ["c2"]
+    previous["candidate_set_results"].append(invalid_b)
+
+    valid_b = _response()
+    valid_b["candidate_set_results"][0]["set_id"] = "B"
+    valid_b["candidate_set_results"][0]["candidate_assessments"][0][
+        "candidate_id"
+    ] = "c2"
+    for gold in valid_b["candidate_set_results"][0]["gold_fact_assessments"]:
+        gold["covering_candidate_ids"] = [
+            "c2" if candidate_id == "c1" else candidate_id
+            for candidate_id in gold["covering_candidate_ids"]
+        ]
+
+    class QueueClient:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def complete(self, **kwargs) -> LLMResponse:
+            self.prompts.append(kwargs["prompt"])
+            return LLMResponse(
+                content=json.dumps(valid_b), input_tokens=10, output_tokens=20,
+                latency_ms=1, finish_reason="stop",
+            )
+
+    client = QueueClient()
+    model = ModelSpec(
+        deploy="api", backend="openai", model_name="judge",
+        tokenizer_name="judge", max_context_tokens=10000,
+        tensor_parallel_size=1, dtype="auto", max_output_tokens=4000,
+    )
+    parsed = _complete_sets_individually(
+        task=task, prompt_text="judge prompt",
+        previous_response=json.dumps(previous), client=client,
+        model_spec=model, output_dir=tmp_path, semantic_retries=2,
+    )
+
+    assert [row["set_id"] for row in parsed["candidate_set_results"]] == [
+        "A", "B"
+    ]
+    assert len(client.prompts) == 1
+    assert '"set_id": "B"' in client.prompts[0]
+    assert '"set_id": "A"' not in client.prompts[0]
+    archives = list((tmp_path / "raw_calls").glob("*.json"))
+    assert len(archives) == 1
+    archive = json.loads(archives[0].read_text(encoding="utf-8"))
+    assert archive["status"] == "fallback_set_committed"
+    assert archive["call_scope"] == "B"
 
 
 def test_set_judge_rejects_full_coverage_without_candidate_ids() -> None:

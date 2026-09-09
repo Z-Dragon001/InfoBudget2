@@ -20,7 +20,7 @@ from infobudget.utils.text import count_tokens
 
 
 PROMPT_VERSION = "segment_fact_set_judge_v3"
-REPAIR_VERSION = "segment_fact_set_repair_v3_previous_response_and_policy"
+REPAIR_VERSION = "segment_fact_set_repair_v4_per_set_fallback"
 SCHEMA_VERSION = "segment_fact_set_judgment_v2"
 SEMANTIC_STATUSES = {
     "SUPPORTED", "PARTIALLY_SUPPORTED", "UNSUPPORTED", "CONTRADICTED"
@@ -154,6 +154,7 @@ def run_segment_set_judging(
         response_prompt = prompt
         validation_error = ""
         previous_response = ""
+        used_per_set_fallback = False
         for semantic_attempt in range(semantic_retries + 1):
             repair_prompt = prompt
             if validation_error:
@@ -187,10 +188,21 @@ def run_segment_set_judging(
                         f"retry {semantic_attempt + 1}/{semantic_retries}"
                     )
                     continue
-                raise ValueError(
-                    f"invalid set-Judge response for {segment_id} after "
-                    f"{semantic_retries + 1} attempts: {validation_error}"
-                ) from exc
+                try:
+                    parsed = _complete_sets_individually(
+                        task=task, prompt_text=prompt_text,
+                        previous_response=previous_response, client=client,
+                        model_spec=model_spec, output_dir=output_dir,
+                        semantic_retries=semantic_retries,
+                    )
+                except (ValueError, ModelAPIError) as fallback_exc:
+                    raise ValueError(
+                        f"invalid set-Judge response for {segment_id} after "
+                        f"{semantic_retries + 1} attempts: {validation_error}; "
+                        f"per-set fallback also failed: {fallback_exc}"
+                    ) from fallback_exc
+                used_per_set_fallback = True
+                break
             response_prompt = repair_prompt
             break
         if parsed is None or response is None:
@@ -199,10 +211,11 @@ def run_segment_set_judging(
             parsed=parsed, task=task, identity=identity, model_spec=model_spec
         )
         ledger.append(row)
-        _archive_call(
-            output_dir, segment_id, response_prompt, "committed", response.content,
-            response, "",
-        )
+        if not used_per_set_fallback:
+            _archive_call(
+                output_dir, segment_id, response_prompt, "committed",
+                response.content, response, "",
+            )
         print(
             f"[set {number}] {segment_id}: "
             f"{len(parsed['candidate_set_results'])} sets committed"
@@ -448,6 +461,144 @@ def _repair_instruction(
     )
 
 
+def _complete_sets_individually(
+    *, task: dict[str, Any], prompt_text: str, previous_response: str,
+    client: ChatCompletionClient, model_spec: ModelSpec, output_dir: Path,
+    semantic_retries: int,
+) -> dict[str, Any]:
+    """Salvage valid sets and judge only incomplete/invalid sets separately."""
+    segment_id = task["segment_id"]
+    valid_results = _valid_set_results(previous_response, task)
+    expected_set_ids = [
+        str(item["set_id"])
+        for item in task["model_input"]["candidate_sets"]
+    ]
+    missing_set_ids = [
+        set_id for set_id in expected_set_ids if set_id not in valid_results
+    ]
+    print(
+        f"[fallback] {segment_id}: judging sets individually: "
+        f"{missing_set_ids}"
+    )
+    for set_id in missing_set_ids:
+        single_task = _single_set_task(task, set_id)
+        prompt = _render(prompt_text, single_task["model_input"])
+        validation_error = ""
+        invalid_response = ""
+        for attempt in range(semantic_retries + 1):
+            call_prompt = prompt
+            if validation_error:
+                call_prompt += _repair_instruction(
+                    single_task, validation_error, invalid_response
+                )
+            try:
+                response = client.complete(
+                    model_spec=model_spec, prompt=call_prompt,
+                    max_new_tokens=_max_tokens(single_task, model_spec),
+                    json_mode=True,
+                )
+            except ModelAPIError as exc:
+                _archive_call(
+                    output_dir, segment_id, call_prompt,
+                    "fallback_transport_failed", "", None, str(exc),
+                    call_scope=set_id,
+                )
+                raise
+            try:
+                parsed = parse_segment_set_judgment(
+                    response.content, single_task
+                )
+            except ValueError as exc:
+                validation_error = str(exc)
+                invalid_response = response.content
+                _archive_call(
+                    output_dir, segment_id, call_prompt,
+                    "fallback_invalid_semantic_response", response.content,
+                    response, validation_error, call_scope=set_id,
+                )
+                if attempt < semantic_retries:
+                    print(
+                        f"[fallback-repair] {segment_id}/{set_id}: invalid "
+                        f"Judge JSON; retry {attempt + 1}/{semantic_retries}"
+                    )
+                    continue
+                raise ValueError(
+                    f"{set_id} remained invalid after "
+                    f"{semantic_retries + 1} per-set attempts: "
+                    f"{validation_error}"
+                ) from exc
+            valid_results[set_id] = parsed["candidate_set_results"][0]
+            _archive_call(
+                output_dir, segment_id, call_prompt, "fallback_set_committed",
+                response.content, response, "", call_scope=set_id,
+            )
+            print(f"[fallback-set] {segment_id}/{set_id}: committed")
+            break
+    combined = {
+        "segment_id": segment_id,
+        "candidate_set_results": [
+            valid_results[set_id] for set_id in expected_set_ids
+        ],
+    }
+    return parse_segment_set_judgment(
+        json.dumps(combined, ensure_ascii=False), task
+    )
+
+
+def _valid_set_results(
+    content: str, task: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Return only sets that independently pass the complete strict parser."""
+    try:
+        payload = _json_object(content)
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    if payload.get("segment_id") != task["segment_id"]:
+        return {}
+    results = payload.get("candidate_set_results")
+    if not isinstance(results, list):
+        return {}
+    valid = {}
+    for candidate_set in task["model_input"]["candidate_sets"]:
+        set_id = str(candidate_set["set_id"])
+        matches = [
+            result for result in results
+            if isinstance(result, dict) and str(result.get("set_id")) == set_id
+        ]
+        if len(matches) != 1:
+            continue
+        single_task = _single_set_task(task, set_id)
+        single_payload = {
+            "segment_id": task["segment_id"],
+            "candidate_set_results": matches,
+        }
+        try:
+            parsed = parse_segment_set_judgment(
+                json.dumps(single_payload, ensure_ascii=False), single_task
+            )
+        except (ValueError, json.JSONDecodeError):
+            continue
+        valid[set_id] = parsed["candidate_set_results"][0]
+    return valid
+
+
+def _single_set_task(task: dict[str, Any], set_id: str) -> dict[str, Any]:
+    candidate_sets = [
+        item for item in task["model_input"]["candidate_sets"]
+        if str(item["set_id"]) == set_id
+    ]
+    if len(candidate_sets) != 1 or set_id not in task["model_by_set"]:
+        raise ValueError(f"unknown or duplicated Candidate set: {set_id}")
+    return {
+        **task,
+        "model_by_set": {set_id: task["model_by_set"][set_id]},
+        "model_input": {
+            **task["model_input"],
+            "candidate_sets": candidate_sets,
+        },
+    }
+
+
 def _build_set_tasks(
     segments_path: Path, references_path: Path, candidates_path: Path, seed: int,
     model_ids: tuple[str, ...],
@@ -631,6 +782,7 @@ def _judgment_row(
         "reference_set_hash": task["reference_set_hash"],
         "set_model_map": task["model_by_set"],
         "prompt_version": PROMPT_VERSION,
+        "repair_version": REPAIR_VERSION,
         "prompt_sha256": identity["prompt_sha256"],
         "judge_model": model_spec.effective_model_name,
         "judged_at": datetime.now(timezone.utc).isoformat(),
@@ -774,6 +926,7 @@ def _max_tokens(task: dict[str, Any], model: ModelSpec) -> int:
 def _archive_call(
     output_dir: Path, segment_id: str, prompt: str, status: str,
     content: str, response: Any, error: str,
+    call_scope: str = "all_sets",
 ) -> None:
     raw = output_dir / "raw_calls"
     raw.mkdir(parents=True, exist_ok=True)
@@ -791,7 +944,8 @@ def _archive_call(
         path,
         {
             "schema_version": "segment_set_llm_call_v2",
-            "segment_id": segment_id, "status": status,
+            "segment_id": segment_id, "call_scope": call_scope,
+            "status": status,
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "response_content": content, "usage": usage, "error": error,
             "archived_at": datetime.now(timezone.utc).isoformat(),
