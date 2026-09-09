@@ -64,6 +64,20 @@ wc -l "$ROOT/gold_evaluation_units_v1.jsonl"
 
 必须满足 `status=complete`、`run_complete=true`、`completed_segment_count=1054`。
 
+Pilot 阶段先导出 Gold claim/time 审核表：
+
+```bash
+uv run python scripts/export_gold_evaluation_unit_review.py \
+  --references "$GOLD" \
+  --gold-units "$ROOT/gold_evaluation_units_v1.jsonl" \
+  --jsonl-output "$ROOT/gold_evaluation_units_review_v1.jsonl" \
+  --csv-output "$ROOT/gold_evaluation_units_review_v1.csv" \
+  --manifest-output "$ROOT/gold_evaluation_units_review_manifest_v1.json"
+```
+
+审核 `claim_units_readable` 和 `required_times_readable`。空白
+`review_status` 表示尚未审核，不表示自动通过。
+
 ## 3. Segment 集合 Judge 只读规划
 
 ```bash
