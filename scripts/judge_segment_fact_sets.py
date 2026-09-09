@@ -27,10 +27,13 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--anonymization-seed", type=int, default=42)
     parser.add_argument("--max-segments", type=int)
+    parser.add_argument("--semantic-retries", type=int, default=2)
     parser.add_argument("--plan-only", action="store_true")
     args = parser.parse_args()
     if args.max_segments is not None and args.max_segments <= 0:
         parser.error("--max-segments must be positive")
+    if args.semantic_retries < 0 or args.semantic_retries > 5:
+        parser.error("--semantic-retries must be between 0 and 5")
     bundle = load_rl_bundle(args.config_dir)
     model = bundle.project.models["judge_llm"]
     price = bundle.project.prices[model.model_name]
@@ -56,6 +59,7 @@ def main() -> None:
         result = run_segment_set_judging(
             **common, output_dir=args.output_dir, output_path=args.output,
             client=client, max_segments=args.max_segments,
+            semantic_retries=args.semantic_retries,
         )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

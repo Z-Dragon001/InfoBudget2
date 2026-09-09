@@ -90,6 +90,7 @@ def run_segment_set_judging(
     output_dir: str | Path, output_path: str | Path,
     model_spec: ModelSpec, price: PriceSpec, client: ChatCompletionClient,
     anonymization_seed: int = 42, max_segments: int | None = None,
+    semantic_retries: int = 2,
 ) -> dict[str, Any]:
     segments_path = Path(segments_path)
     references_path = Path(references_path)
@@ -145,33 +146,54 @@ def run_segment_set_judging(
     for number, task in enumerate(remaining, start=1):
         prompt = _render(prompt_text, task["model_input"])
         segment_id = task["segment_id"]
-        try:
-            response = client.complete(
-                model_spec=model_spec, prompt=prompt,
-                max_new_tokens=_max_tokens(task, model_spec), json_mode=True,
-            )
-        except ModelAPIError as exc:
-            _archive_call(
-                output_dir, segment_id, prompt, "transport_failed", "", None,
-                str(exc),
-            )
-            raise
-        try:
-            parsed = parse_segment_set_judgment(response.content, task)
-        except ValueError as exc:
-            _archive_call(
-                output_dir, segment_id, prompt, "invalid_semantic_response",
-                response.content, response, str(exc),
-            )
-            raise ValueError(
-                f"invalid set-Judge response for {segment_id}: {exc}"
-            ) from exc
+        parsed = None
+        response = None
+        response_prompt = prompt
+        validation_error = ""
+        for semantic_attempt in range(semantic_retries + 1):
+            repair_prompt = prompt
+            if validation_error:
+                repair_prompt += _repair_instruction(task, validation_error)
+            try:
+                response = client.complete(
+                    model_spec=model_spec, prompt=repair_prompt,
+                    max_new_tokens=_max_tokens(task, model_spec), json_mode=True,
+                )
+            except ModelAPIError as exc:
+                _archive_call(
+                    output_dir, segment_id, repair_prompt, "transport_failed", "",
+                    None, str(exc),
+                )
+                raise
+            try:
+                parsed = parse_segment_set_judgment(response.content, task)
+            except ValueError as exc:
+                validation_error = str(exc)
+                _archive_call(
+                    output_dir, segment_id, repair_prompt,
+                    "invalid_semantic_response", response.content, response,
+                    validation_error,
+                )
+                if semantic_attempt < semantic_retries:
+                    print(
+                        f"[repair] {segment_id}: invalid Judge JSON; "
+                        f"retry {semantic_attempt + 1}/{semantic_retries}"
+                    )
+                    continue
+                raise ValueError(
+                    f"invalid set-Judge response for {segment_id} after "
+                    f"{semantic_retries + 1} attempts: {validation_error}"
+                ) from exc
+            response_prompt = repair_prompt
+            break
+        if parsed is None or response is None:
+            raise RuntimeError(f"set-Judge produced no result for {segment_id}")
         row = _judgment_row(
             parsed=parsed, task=task, identity=identity, model_spec=model_spec
         )
         ledger.append(row)
         _archive_call(
-            output_dir, segment_id, prompt, "committed", response.content,
+            output_dir, segment_id, response_prompt, "committed", response.content,
             response, "",
         )
         print(
@@ -200,16 +222,9 @@ def parse_segment_set_judgment(
     expected_sets = {
         item["set_id"]: item for item in task["model_input"]["candidate_sets"]
     }
-    returned_sets = [
-        str(item.get("set_id") or "") for item in results
-        if isinstance(item, dict)
-    ]
-    if (
-        len(results) != len(returned_sets)
-        or set(returned_sets) != set(expected_sets)
-        or len(returned_sets) != len(set(returned_sets))
-    ):
-        raise ValueError("Candidate set IDs are missing, extra, or duplicated")
+    _canonicalize_structural_ids(
+        results, "set_id", list(expected_sets), "Candidate set"
+    )
     required_time = {
         str(fact["gold_fact_id"]): bool(fact["requires_exact_time"])
         for fact in task["model_input"]["gold_facts"]
@@ -224,17 +239,14 @@ def parse_segment_set_judgment(
         assessments = result.get("candidate_assessments")
         if not isinstance(assessments, list):
             raise ValueError(f"{set_id}: candidate_assessments must be a list")
-        returned_candidates = [
-            str(item.get("candidate_id") or "") for item in assessments
-            if isinstance(item, dict)
+        expected_candidate_order = [
+            str(item["candidate_id"])
+            for item in expected_sets[set_id]["facts"]
         ]
-        if (
-            set(returned_candidates) != candidate_ids
-            or len(returned_candidates) != len(candidate_ids)
-        ):
-            raise ValueError(
-                f"{set_id}: Candidate IDs are missing, extra, or duplicated"
-            )
+        _canonicalize_structural_ids(
+            assessments, "candidate_id", expected_candidate_order,
+            f"{set_id} Candidate",
+        )
         status_by_candidate = {}
         for item in assessments:
             candidate_id = str(item["candidate_id"])
@@ -251,17 +263,9 @@ def parse_segment_set_judgment(
         gold = result.get("gold_fact_assessments")
         if not isinstance(gold, list):
             raise ValueError(f"{set_id}: gold_fact_assessments must be a list")
-        returned_gold = [
-            str(item.get("gold_fact_id") or "") for item in gold
-            if isinstance(item, dict)
-        ]
-        if (
-            set(returned_gold) != set(required_time)
-            or len(returned_gold) != len(required_time)
-        ):
-            raise ValueError(
-                f"{set_id}: Gold Fact IDs are missing, extra, or duplicated"
-            )
+        _canonicalize_structural_ids(
+            gold, "gold_fact_id", list(required_time), f"{set_id} Gold Fact"
+        )
         for item in gold:
             gold_id = str(item["gold_fact_id"])
             if item.get("coverage_status") not in COVERAGE_STATUSES:
@@ -321,6 +325,56 @@ def gold_requires_exact_time(text: str) -> bool:
         r"\d+\s+times?\s+(?:a|per)\s+(?:day|week|month|year))\b",
     )
     return any(re.search(pattern, value) for pattern in patterns)
+
+
+def _canonicalize_structural_ids(
+    items: Any, field: str, expected_order: list[str], label: str,
+) -> None:
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        raise ValueError(f"{label} entries must be objects")
+    returned = [str(item.get(field) or "") for item in items]
+    if (
+        len(returned) == len(expected_order)
+        and len(set(returned)) == len(returned)
+        and set(returned) == set(expected_order)
+    ):
+        return
+    counts = Counter(returned)
+    duplicates = sorted(value for value, count in counts.items() if count > 1)
+    missing = sorted(set(expected_order) - set(returned))
+    extra = sorted(set(returned) - set(expected_order))
+    raise ValueError(
+        f"{label} IDs invalid; expected_count={len(expected_order)}, "
+        f"returned_count={len(items)}, missing={missing[:8]}, "
+        f"extra={extra[:8]}, duplicated={duplicates[:8]}"
+    )
+
+
+def _repair_instruction(task: dict[str, Any], validation_error: str) -> str:
+    candidate_sets = task["model_input"]["candidate_sets"]
+    requirements = {
+        "segment_id": task["segment_id"],
+        "set_ids": [str(item["set_id"]) for item in candidate_sets],
+        "candidate_ids_by_set": {
+            str(item["set_id"]): [
+                str(fact["candidate_id"]) for fact in item["facts"]
+            ]
+            for item in candidate_sets
+        },
+        "gold_fact_ids_required_in_every_set": [
+            str(item["gold_fact_id"])
+            for item in task["model_input"]["gold_facts"]
+        ],
+    }
+    return (
+        "\n\nREPAIR_INSTRUCTION:\n"
+        f"The previous JSON failed validation: {validation_error}\n"
+        "Return a complete replacement JSON object, not a patch. Copy every "
+        "required ID below exactly once. Do not invent, abbreviate, replace, "
+        "or duplicate IDs. Preserve the intended semantic judgments while "
+        "repairing the structure.\nREQUIRED_STRUCTURE:\n"
+        + json.dumps(requirements, ensure_ascii=False, sort_keys=True)
+    )
 
 
 def _build_set_tasks(

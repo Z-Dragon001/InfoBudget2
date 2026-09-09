@@ -89,6 +89,26 @@ def test_set_judge_rejects_full_coverage_without_candidate_ids() -> None:
         parse_segment_set_judgment(json.dumps(response), _task())
 
 
+def test_set_judge_accepts_valid_gold_id_reordering_without_remapping() -> None:
+    response = _response()
+    gold = response["candidate_set_results"][0]["gold_fact_assessments"]
+    gold.reverse()
+    parsed = parse_segment_set_judgment(json.dumps(response), _task())
+    returned = parsed["candidate_set_results"][0]["gold_fact_assessments"]
+    assert [item["gold_fact_id"] for item in returned] == ["g2", "g1"]
+    assert returned[0]["time_status"] == "NOT_APPLICABLE"
+
+
+def test_set_judge_rejects_duplicate_gold_ids_instead_of_guessing_mapping() -> None:
+    response = _response()
+    gold = response["candidate_set_results"][0]["gold_fact_assessments"]
+    gold[1]["gold_fact_id"] = "g1"
+    with pytest.raises(
+        ValueError, match=r"missing=\['g2'\].*duplicated=\['g1'\]"
+    ):
+        parse_segment_set_judgment(json.dumps(response), _task())
+
+
 def test_pilot_selection_round_robins_conversations() -> None:
     rows = [
         {"sample_id": sample_id, "segment_id": f"{sample_id}-{index}"}
