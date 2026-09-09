@@ -278,7 +278,13 @@ def parse_segment_set_judgment(
             )
 
         gold = result.get("gold_fact_assessments")
-        if not isinstance(gold, list):
+        if not expected_gold_order:
+            # There is no Gold judgment to make. Keep the raw model response in
+            # raw_calls for audit, but never admit invented placeholder IDs into
+            # the committed artifact.
+            gold = []
+            result["gold_fact_assessments"] = gold
+        elif not isinstance(gold, list):
             raise ValueError(f"{set_id}: gold_fact_assessments must be a list")
         _canonicalize_structural_ids(
             gold, "gold_fact_id", expected_gold_order, f"{set_id} Gold Fact"
@@ -391,6 +397,10 @@ def _repair_instruction(
             str(item["gold_fact_id"])
             for item in gold_facts
         ],
+        "zero_gold_policy": (
+            "gold_fact_assessments must be [] because this Segment has no Gold Facts"
+            if not gold_facts else "not applicable"
+        ),
     }
     return (
         "\n\nREPAIR_INSTRUCTION:\n"
@@ -833,6 +843,7 @@ def _write_current_artifacts(
             "gold_decomposition_used": False,
             "exact_gold_time_is_hard_gate": True,
             "time_applicability_decided_by": "judge",
+            "zero_gold_assessments_forced_empty": True,
         },
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }

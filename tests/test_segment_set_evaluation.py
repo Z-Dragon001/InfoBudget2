@@ -111,6 +111,40 @@ def test_set_judge_reports_all_detectable_semantic_errors() -> None:
     assert "g2: invalid coverage_status 'SUPPORTED'" in message
 
 
+def test_set_judge_forces_empty_assessments_for_zero_gold() -> None:
+    task = _task()
+    task["model_input"]["gold_facts"] = []
+    response = _response()
+    response["candidate_set_results"][0]["gold_fact_assessments"] = [
+        {
+            "gold_fact_id": "fact_1", "coverage_status": "NONE",
+            "covering_candidate_ids": [], "time_status": "NOT_APPLICABLE",
+            "covered_content": [], "missing_or_incorrect_content": [],
+        }
+    ]
+    parsed = parse_segment_set_judgment(json.dumps(response), task)
+    result = parsed["candidate_set_results"][0]
+    assert result["gold_fact_assessments"] == []
+
+
+def test_set_judge_accepts_missing_assessment_field_for_zero_gold() -> None:
+    task = _task()
+    task["model_input"]["gold_facts"] = []
+    response = _response()
+    del response["candidate_set_results"][0]["gold_fact_assessments"]
+    parsed = parse_segment_set_judgment(json.dumps(response), task)
+    result = parsed["candidate_set_results"][0]
+    assert result["gold_fact_assessments"] == []
+
+
+def test_repair_instruction_explicitly_requires_empty_zero_gold_list() -> None:
+    task = _task()
+    task["model_input"]["gold_facts"] = []
+    prompt = _repair_instruction(task, "invented Gold IDs", "{}")
+    assert "this Segment has no Gold Facts" in prompt
+    assert '"gold_fact_ids_required_in_every_set": []' in prompt
+
+
 def test_repair_instruction_includes_previous_json_and_full_policy() -> None:
     previous = '{"segment_id":"seg-1","candidate_set_results":[]}'
     prompt = _repair_instruction(_task(), "example validation error", previous)
